@@ -47,9 +47,10 @@ def verify_manifest(directory: Path, expected: str) -> None:
     listed = set()
     for line in manifest.read_text().splitlines():
         require(len(line) >= 67 and line[64:66] == "  ", "invalid manifest entry")
-        name = line[66:]
-        file = directory / name
-        require(name not in listed and not Path(name).is_absolute() and ".." not in Path(name).parts
+        raw_name = line[66:]
+        name = Path(raw_name).as_posix()
+        file = directory / raw_name
+        require(name not in listed and not Path(raw_name).is_absolute() and ".." not in Path(raw_name).parts
                 and file.is_file() and not file.is_symlink(), "unexpected manifest path")
         listed.add(name)
     actual = {path.relative_to(directory).as_posix() for path in directory.rglob("*")

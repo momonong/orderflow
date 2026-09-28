@@ -1,5 +1,7 @@
 """Migration checks must preserve real Store relations and PDF bytes."""
 import hashlib
+import runpy
+import sys
 from pathlib import Path
 import shutil
 import sqlite3
@@ -14,6 +16,24 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_release_manifest_accepts_archive_paths_and_rejects_extra_source(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        sys.path.insert(0, str(deploy_dir))
+        try:
+            verify = runpy.run_path(str(deploy_dir / "import-asus-state.py"))["verify_manifest"]
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as root:
+            stage = Path(root)
+            source = stage / "orderflow.py"
+            source.write_text("source fixture\n")
+            manifest = stage / "release-manifest.sha256"
+            manifest.write_text(f"{hashlib.sha256(source.read_bytes()).hexdigest()}  ./orderflow.py\n")
+            verify(stage, hashlib.sha256(manifest.read_bytes()).hexdigest())
+            (stage / "unlisted.py").write_text("unexpected\n")
+            with self.assertRaisesRegex(RuntimeError, "inventory"):
+                verify(stage, hashlib.sha256(manifest.read_bytes()).hexdigest())
+
     def test_legacy_anonymous_session_survives_copy_and_pending_job_is_not_replayed(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "source"
