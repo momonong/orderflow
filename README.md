@@ -26,7 +26,7 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data
 
 正式公開入口的路由、認證與操作由 `selfhost-servers` 專案管理。此服務仍只綁 loopback；使用 `--public-origin https://momonong.me` 時，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 增加 `Secure`。入口需對 `/orderflow` 與 `/orderflow/*` 執行獨立認證並保留前綴；不得讓匿名用戶直連上傳 API。應用不信任任意客戶端提供的代理標頭，也不從前端接受任意 Google URL 或模型 ID。健康檢查為 `/orderflow/api/health`。
 
-公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。應用 service unit 候選檔見 `deploy/orderflow.service`：以 systemd `DynamicUser` 專屬身份執行、`StateDirectory` 保存 0700 資料，程式碼在 root 擁有的 `/opt/orderflow/current` 唯讀使用，服務禁止讀取一般使用者家目錄。實際入口與 systemd 狀態依部署後驗證紀錄判定。
+公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。應用 service unit 候選檔見 `deploy/orderflow.service`：以 systemd `DynamicUser` 專屬身份執行、`StateDirectory` 保存 0700 資料，程式碼在 root 擁有的 `/opt/orderflow/current` 唯讀使用，服務禁止讀取一般使用者家目錄。實際入口與 systemd 狀態依部署後驗證紀錄判定。HP 首次安裝腳本為 `deploy/install-hp.sh`，只接受已在 `/home/morris/orderflow-staging/<commit>` 準備並以逐檔雜湊校驗的版本；需停止測試程序讓 18081 空出後，由管理員以 `sudo sh deploy/install-hp.sh <commit>` 執行。失敗時移除新建 unit 與 current 連結，保留 release 供診斷，不刪資料。
 
 ## 驗證
 
