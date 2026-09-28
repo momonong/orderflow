@@ -4,7 +4,7 @@
 
 ## 自動化
 
-- `uv run --locked python -m unittest discover -s tests -v`：7 個 HTTP／持久化整合測試通過。涵蓋 `/orderflow/` 靜態資源與 JSON、session 隔離、有效／無效／超限 PDF、大小與 SHA-256 不一致、並發同鍵上傳／派工、明確重新辨識、模擬成功／AI 失敗／逾時結果不明／格式失敗、重啟後未知狀態、Host 拒絕，以及上傳／JSON 不完整請求的時限。
+- `uv run --locked python -m unittest discover -s tests -v`：8 個 HTTP／持久化整合測試通過。涵蓋 `/orderflow/` 靜態資源與 JSON、session 隔離、有效／無效／超限 PDF、大小與 SHA-256 不一致、並發同鍵上傳／派工、明確重新辨識、模擬成功／AI 失敗／逾時結果不明／格式失敗、重啟後未知狀態、Host 拒絕，以及上傳／JSON 不完整請求與 PDF 解析的時限。
 - `node tests/test_report.cjs`：報告不包含注入的檔名／原始結果／秘密標記，成功複製內容與畫面狀態一致，剪貼簿失敗時選取 textarea 並提示手動複製。
 - `node --check web/app.js`、`uv lock --check --offline`：通過。
 

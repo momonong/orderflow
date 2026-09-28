@@ -165,7 +165,7 @@ async function upload() {
     const response = await api("documents", {method: "POST", headers: {
       "Content-Type": "application/pdf", "X-File-Size": String(file.size),
       "X-File-SHA256": hash, "X-Request-Key": uploadKey
-    }, body: file}, 15000);
+    }, body: file}, 25000);
     const doc = response.data;
     if (doc.size !== file.size || doc.sha256 !== hash) throw {code: "RECEIPT_MISMATCH"};
     documents.unshift(doc);

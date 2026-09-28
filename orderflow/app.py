@@ -5,13 +5,13 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import hashlib
-import io
-import logging
 import http.cookies
 import json
 import os
 import secrets
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -49,20 +49,27 @@ def valid_uuid(value: object) -> bool:
         return False
 
 
+class PDFCheckTimeout(Exception):
+    pass
+
+
 def pdf_page_count(data: bytes) -> int | None:
-    if not (data.startswith(b"%PDF-") and data.rstrip().endswith(b"%%EOF")):
-        return None
-    # Suppress parser warnings: diagnostics must never contain document content.
-    logger = logging.getLogger("pypdf")
-    logger.propagate = False
-    logger.setLevel(logging.CRITICAL)
     try:
-        reader = PdfReader(io.BytesIO(data), strict=True)
-        if reader.is_encrypted:
-            return None
-        count = len(reader.pages)
+        result = subprocess.run(
+            [sys.executable, "-m", "orderflow.pdfcheck"], input=data,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False,
+            env={"PYTHONPATH": str(ROOT)},
+        )
+    except subprocess.TimeoutExpired:
+        raise PDFCheckTimeout from None
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        count = int(result.stdout)
         return count if count > 0 else None
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -477,7 +484,11 @@ class Handler(BaseHTTPRequestHandler):
         if len(data) != length:
             self.error(400, "UPLOAD_INCOMPLETE")
             return
-        page_count = pdf_page_count(data)
+        try:
+            page_count = pdf_page_count(data)
+        except PDFCheckTimeout:
+            self.error(408, "PDF_CHECK_TIMEOUT")
+            return
         if page_count is None:
             self.error(415, "PDF_INVALID")
             return

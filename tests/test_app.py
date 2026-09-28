@@ -4,6 +4,7 @@ import http.client
 import json
 import socket
 from unittest.mock import patch
+import subprocess
 import tempfile
 import threading
 import time
@@ -169,6 +170,12 @@ class ApiTests(unittest.TestCase):
             response = sock.recv(4096)
             self.assertIn(b"408 Request Timeout", response)
             sock.close()
+
+    def test_pdf_checker_timeout_is_bounded(self):
+        with patch("orderflow.app.subprocess.run", side_effect=subprocess.TimeoutExpired("pdfcheck", 5)):
+            status, data, _ = self.upload()
+        self.assertEqual((status, data["error_code"]), (408, "PDF_CHECK_TIMEOUT"))
+        self.assertEqual(self.request("GET", "/orderflow/api/bootstrap")[1]["documents"], [])
 
     def test_host_header_rejected(self):
         status, data, _ = self.request("GET", "/orderflow/api/bootstrap", headers={"Host": "other.example"})
