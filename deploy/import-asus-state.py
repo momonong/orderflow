@@ -167,6 +167,7 @@ def main() -> None:
         credential.parent.mkdir(mode=0o700, exist_ok=True)
         shutil.copyfile(private / "login-auth.caddy", credential)
         credential.chmod(0o600)
+        (transfer / "login-auth.caddy").unlink()
         shutil.copyfile(release / "deploy/orderflow-asus.service", unit)
         unit.chmod(0o644)
         run("systemd-analyze", "verify", str(unit))
