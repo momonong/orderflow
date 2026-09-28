@@ -1,25 +1,50 @@
-:root { color-scheme: light; font-family: system-ui, "Noto Sans TC", sans-serif; background: #f5f7fa; color: #182333; }
+:root { color-scheme: light; font-family: system-ui, "Noto Sans TC", sans-serif; background: #f4f7f9; color: #182333; }
 * { box-sizing: border-box; }
 body { margin: 0; }
-main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
-header { padding: 24px 28px; border-radius: 14px; background: #173b55; color: white; }
-header p { max-width: 70ch; line-height: 1.6; }
-h1 { margin: 8px 0; font-size: clamp(1.8rem, 4vw, 2.6rem); }
-h2 { margin-top: 0; }
+main { max-width: 880px; margin: 0 auto; padding: 20px 16px 60px; }
+header { padding: 28px; border-radius: 14px; background: #173b55; color: white; }
+header p { max-width: 70ch; line-height: 1.65; }
+h1 { margin: 8px 0; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+h2 { margin-top: 0; display: flex; align-items: center; gap: 10px; }
 .eyebrow { font-weight: 700; letter-spacing: .04em; color: #b5e4df; }
-section { margin-top: 18px; padding: 22px 26px; background: white; border: 1px solid #dce4ea; border-radius: 12px; box-shadow: 0 2px 6px #112a3a0a; }
-section p { line-height: 1.55; }
+.next-step, .privacy-note { margin: 16px 0; padding: 16px 20px; border-radius: 10px; line-height: 1.6; }
+.next-step { background: #dceff3; border-left: 5px solid #12678b; font-weight: 700; }
+.privacy-note { background: #fff4de; border: 1px solid #edcf86; }
+section { margin-top: 18px; padding: 23px 26px; background: white; border: 1px solid #dce4ea; border-radius: 12px; box-shadow: 0 2px 6px #112a3a0a; }
+section p { line-height: 1.6; }
+.step-number { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; border-radius: 50%; background: #dceff3; color: #0e5373; font-size: 1rem; }
 button, select, input { font: inherit; }
-button { border: 0; border-radius: 7px; padding: 9px 14px; margin: 4px 6px 4px 0; background: #15688a; color: white; cursor: pointer; }
+button { border: 0; border-radius: 7px; padding: 11px 17px; margin: 4px 6px 4px 0; background: #15688a; color: white; cursor: pointer; font-weight: 700; }
 button:hover:not(:disabled) { background: #0b4c69; }
 button:disabled { background: #9aabb5; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #de9d2b; outline-offset: 2px; }
 input[type=file] { display: block; max-width: 100%; padding: 12px 0; }
 select { padding: 8px; margin: 4px 8px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.status { margin: 12px 0; padding: 10px 13px; background: #eef3f6; border-radius: 7px; }
+.status[data-state=pass] { background: #e1f3e8; color: #165436; }
+.status[data-state=fail] { background: #fff0e8; color: #873d20; }
+.status[data-state=working] { background: #e4efff; color: #234a79; }
+.status[data-state=unknown] { background: #fff4dd; color: #725013; }
+.hint { color: #526576; font-size: .95rem; }
+details { margin-top: 16px; }
+summary { cursor: pointer; color: #17536f; font-weight: 600; padding: 6px 0; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; margin-top: 10px; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #dde6ec; }
 th { background: #eaf1f5; }
 textarea { display: block; width: 100%; margin-top: 12px; padding: 12px; font: 13px/1.5 ui-monospace, monospace; border: 1px solid #a8bbc6; border-radius: 6px; background: #f9fbfc; }
-.document { display: block; width: 100%; text-align: left; background: #e7f0f4; color: #143a50; }
+.document { display: block; width: 100%; text-align: left; background: #e7f0f4; color: #143a50; font-weight: 400; }
 .document:hover:not(:disabled) { background: #d3e7ed; }
+#report-section.ready { border-color: #93c9b2; }
+#report-section.ready .copy-button { background: #126c51; }
 footer { margin-top: 25px; color: #526576; }
+@media (max-width: 600px) { header, section { padding: 18px; } h2 { font-size: 1.15rem; } }
+
+.real-ai { margin-top: 22px; padding: 18px; border: 1px solid #b7cfdb; border-radius: 10px; background: #f8fbfd; }
+.real-ai h3 { margin-top: 0; }
+.real-ai input[type=password] { display: block; width: min(100%, 520px); margin: 8px 0 12px; padding: 10px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.real-ai .privacy-note { margin: 14px 0; }
+
+[hidden] { display: none !important; }
+#login-password { display: block; width: min(100%, 520px); margin: 10px 0; padding: 11px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.logout-button { float: right; background: #526576; }

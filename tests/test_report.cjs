@@ -5,8 +5,9 @@ const source = fs.readFileSync('web/app.js', 'utf8').replace(/\ninitialize\(\);\
 
 async function check(clipboard) {
   const report = {value: '', focused: false, selected: false, focus() {this.focused = true;}, select() {this.selected = true;}};
-  const status = {textContent: ''};
-  const elements = {report, 'copy-status': status};
+  const status = {textContent: '', dataset: {}};
+  const details = {open: false};
+  const elements = {report, 'copy-status': status, 'report-details': details};
   const context = vm.createContext({
     document: {getElementById(id) {return elements[id];}},
     navigator: {userAgent: 'TestBrowser/1', clipboard},
@@ -15,10 +16,10 @@ async function check(clipboard) {
   });
   vm.runInContext(source, context);
   vm.runInContext('currentDocument = {id: \"doc\", size: 400, page_count: 1, name: \"PRIVATE_PDF_FILENAME\", secret: \"API_SECRET\"}; currentJob = {id: \"job\", raw_response: \"RAW_AI_RESPONSE\"}; updateReport()', context);
-  assert.match(report.value, /本機模擬/);
+  assert.match(report.value, /辨識模式：固定資料模擬/);
   assert.doesNotMatch(report.value, /PRIVATE_PDF_FILENAME|RAW_AI_RESPONSE|API_SECRET/);
   await vm.runInContext('copyReport()', context);
-  return {report, status};
+  return {report, status, details};
 }
 
 (async () => {
@@ -30,6 +31,7 @@ async function check(clipboard) {
   const failure = await check({writeText: async () => {throw Error('denied');}});
   assert.equal(failure.report.focused, true);
   assert.equal(failure.report.selected, true);
+  assert.equal(failure.details.open, true);
   assert.match(failure.report.value, /報告複製：失敗/);
   assert.match(failure.status.textContent, /手動複製/);
   console.log('report copy and manual fallback: ok');
