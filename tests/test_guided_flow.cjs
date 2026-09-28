@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync('web/app.js', 'utf8').replace(/\ninitialize\(\);\s*$/, '\n');
+const source = fs.readFileSync('web/app.js', 'utf8').split('\ninitialize().catch(')[0];
 const elements = Object.fromEntries([
   'report', 'basic-button', 'basic-status', 'next-step', 'pdf-file',
   'upload-button', 'upload-status', 'selected-file', 'sample-body', 'report-section', 'check-status'
