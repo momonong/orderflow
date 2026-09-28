@@ -33,16 +33,14 @@ grep -Fq 'import /etc/caddy/secrets/orderflow-auth.caddy' /etc/caddy/Caddyfile |
   echo 'Target release already exists.' >&2; exit 1;
 }
 (cd "$stage" && sha256sum -c release-manifest.sha256 --status)
-PYTHONPATH="$stage" "$stage/.venv/bin/python" -c \
-  'from orderflow.auth import load_caddy_hash; from pathlib import Path; load_caddy_hash(Path("/etc/caddy/secrets/orderflow-auth.caddy"))' || {
-  echo 'Login credential cannot be loaded.' >&2; exit 1;
-}
 systemd-analyze verify "$stage/deploy/orderflow.service"
 install -d -o root -g root -m 0755 "$release"
 cp -a "$stage"/. "$release"/
 chown -R root:root "$release"
 chmod -R go-w "$release"
 chmod 0755 "$release"
+# Recheck the root-owned copy. Do not execute staged or release Python as root.
+(cd "$release" && sha256sum -c release-manifest.sha256 --status)
 backup=/var/backups/orderflow/pre-session-$commit
 [ ! -e "$backup" ] || { echo 'Backup destination already exists.' >&2; exit 1; }
 install -d -o root -g root -m 0700 /var/backups/orderflow "$backup" "$backup/data"
