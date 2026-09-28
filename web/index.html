@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderFlow 公司端可行性驗證</title>
+  <link rel="stylesheet" href="/orderflow/style.css">
+  <script src="/orderflow/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">OrderFlow · 本機模擬測試</p>
+      <h1>公司端可行性驗證</h1>
+      <p>依序檢查網頁、同站 API、PDF 傳輸與模擬辨識。測試結果只適用於這次環境，不代表真實 AI 或公司網路已通過。</p>
+    </header>
+    <section aria-labelledby="basic-title">
+      <h2 id="basic-title">1. 基本檢查</h2>
+      <button id="basic-button" type="button">執行基本檢查</button>
+      <p id="basic-status" role="status">尚未執行</p>
+      <div class="table-wrap"><table><thead><tr><th>測試品項</th><th>數量</th></tr></thead><tbody id="sample-body"></tbody></table></div>
+    </section>
+    <section aria-labelledby="upload-title">
+      <h2 id="upload-title">2. PDF 傳輸</h2>
+      <p>上限 8 MiB。請只用去識別測試 PDF；此頁會把文件保存在本機。選檔後仍需確認才上傳。</p>
+      <input id="pdf-file" type="file" accept="application/pdf,.pdf">
+      <button id="upload-button" type="button">確認並上傳</button>
+      <p id="upload-status" role="status">尚未上傳</p>
+      <div id="document-list" aria-label="已收文件"></div>
+    </section>
+    <section aria-labelledby="ai-title">
+      <h2 id="ai-title">3. 模擬辨識</h2>
+      <p>這是固定假回應，不會呼叫外部 AI。上傳完成後，請另外啟動。重新辨識會建立新的嘗試。</p>
+      <label for="scenario">模擬情境</label>
+      <select id="scenario"><option value="success">成功</option><option value="fail">AI 故障</option><option value="timeout">AI 逾時／結果不明</option><option value="invalid">結果格式錯誤</option></select>
+      <button id="recognize-button" type="button" disabled>開始模擬辨識</button>
+      <button id="rerun-button" type="button" disabled>明確重新辨識</button>
+      <p id="ai-status" role="status">尚未執行</p>
+      <div class="table-wrap"><table><thead><tr><th>模擬品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
+    </section>
+    <section aria-labelledby="report-title">
+      <h2 id="report-title">4. 診斷報告</h2>
+      <p>報告不含檔名、PDF 內容、辨識品項或存取憑證。請檢查後再分享。</p>
+      <button id="copy-button" type="button">複製報告</button>
+      <span id="copy-status" role="status"></span>
+      <textarea id="report" rows="19" readonly aria-label="可手動選取的診斷報告"></textarea>
+      <p>若整個網站無法載入，請由人提供瀏覽器錯誤截圖與發生時間；頁面無法自行產生報告。</p>
+    </section>
+    <footer>本機 PoC · 真實 AI、HTTPS 入口、公司瀏覽器與資料外傳許可尚未驗證。</footer>
+  </main>
+</body>
+</html>
