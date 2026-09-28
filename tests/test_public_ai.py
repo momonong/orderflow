@@ -9,6 +9,8 @@ import unittest
 import urllib.error
 import uuid
 from pathlib import Path
+
+import bcrypt
 from unittest.mock import patch
 
 from pypdf import PdfWriter
@@ -18,6 +20,8 @@ from orderflow.gemini import GeminiAdapter, MODEL, _generate
 
 ORIGIN = "https://momonong.me"
 FAKE_KEY = "fake-test-key-never-use-12345"
+TEST_PASSWORD = "test-password"
+TEST_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt(rounds=4))
 writer = PdfWriter()
 writer.add_blank_page(width=100, height=100)
 stream = io.BytesIO()
@@ -29,17 +33,25 @@ class PublicAiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.tmp.name))
-        self.server = AppServer(("127.0.0.1", 0), self.store, ORIGIN)
+        self.server = AppServer(("127.0.0.1", 0), self.store, ORIGIN, TEST_HASH)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        status, data, cookie = self.request("GET", "/orderflow/api/bootstrap")
+        self.cookie, issued = self.login(cookie="")
+        self.assertIn("; Secure", issued)
+        status, data, _ = self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)
         self.assertEqual(status, 200)
-        self.cookie = cookie.split(";", 1)[0]
-        self.assertIn("; Secure", cookie)
         self.assertFalse(data["ai_key_configured"])
         self.assertEqual(data["ai_model"], MODEL)
 
     def tearDown(self):
+        # Request handlers may finish before their background recognition thread.
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            with self.store.db() as db:
+                active = db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+            if not active:
+                break
+            time.sleep(0.05)
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
@@ -56,10 +68,17 @@ class PublicAiTests(unittest.TestCase):
         conn.request(method, path, body=body, headers=hdr)
         resp = conn.getresponse()
         raw = resp.read()
-        data = json.loads(raw) if resp.getheader("Content-Type", "").startswith("application/json") else raw
+        data = json.loads(raw) if raw and resp.getheader("Content-Type", "").startswith("application/json") else raw
         result = resp.status, data, resp.getheader("Set-Cookie")
         conn.close()
         return result
+
+    def login(self, cookie=""):
+        status, data, issued = self.request("POST", "/orderflow/api/login",
+                                            json.dumps({"password": TEST_PASSWORD}),
+                                            {"Content-Type": "application/json"}, cookie=cookie)
+        self.assertEqual((status, data["status"]), (200, "ok"))
+        return issued.split(";", 1)[0], issued
 
     def post_json(self, path, value, *, cookie=None, headers=None):
         return self.request("POST", path, json.dumps(value), {"Content-Type": "application/json", **(headers or {})}, cookie or self.cookie)
@@ -70,10 +89,89 @@ class PublicAiTests(unittest.TestCase):
             "X-File-SHA256": hashlib.sha256(PDF).hexdigest(), "X-Request-Key": str(uuid.uuid4()),
         }, self.cookie)
 
+    def test_anonymous_api_and_unsupported_methods_are_closed(self):
+        for method, path in (
+            ("GET", "/orderflow/api/health"), ("GET", "/orderflow/api/bootstrap"),
+            ("GET", "/orderflow/api/key"), ("GET", "/orderflow/api/sample"),
+            ("GET", "/orderflow/api/jobs/" + str(uuid.uuid4())),
+            ("GET", "/orderflow/api/unknown"), ("POST", "/orderflow/api/key/check"),
+            ("POST", "/orderflow/api/jobs"), ("DELETE", "/orderflow/api/key"),
+            ("PUT", "/orderflow/api/bootstrap"), ("HEAD", "/orderflow/api/health"),
+            ("OPTIONS", "/orderflow/api/documents"),
+        ):
+            with self.subTest(method=method, path=path):
+                status, _, _ = self.request(method, path, cookie="of_session=invalid")
+                self.assertEqual(status, 401)
+        status, _, _ = self.request("POST", "/orderflow/api/documents", b"fake",
+                                    {"Content-Type": "application/pdf"}, "of_session=invalid")
+        self.assertEqual(status, 401)
+        self.assertEqual(self.request("GET", "/orderflow/")[0], 200)
+
+    def test_login_rotation_logout_relogin_and_key_clear(self):
+        original = self.cookie
+        original_id = self.store.session(original.split("=", 1)[1])
+        status, doc, _ = self.upload()
+        self.assertEqual(status, 201)
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        again, issued = self.login(cookie=original)
+        self.assertNotEqual(original, again)
+        self.assertEqual(self.store.session(again.split("=", 1)[1]), original_id)
+        self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=original)[0], 401)
+        self.assertFalse(self.request("GET", "/orderflow/api/key", cookie=again)[1]["configured"])
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY}, cookie=again)
+        status, _, anon_issued = self.request("POST", "/orderflow/api/logout", cookie=again)
+        self.assertEqual(status, 200)
+        anon = anon_issued.split(";", 1)[0]
+        self.assertNotEqual(again, anon)
+        for cookie in (original, again, anon):
+            self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=cookie)[0], 401)
+        restored, _ = self.login(cookie=anon)
+        bootstrap = self.request("GET", "/orderflow/api/bootstrap", cookie=restored)[1]
+        self.assertEqual(bootstrap["documents"][0]["id"], doc["id"])
+        self.assertFalse(bootstrap["ai_key_configured"])
+        self.assertEqual(self.store.session(restored.split("=", 1)[1]), original_id)
+        self.assertNotIn(TEST_PASSWORD, self.store.db_path.read_bytes().decode("utf-8", "ignore"))
+        self.assertIn("HttpOnly", issued)
+        self.assertIn("SameSite=Strict", issued)
+        self.assertIn("Path=/orderflow/", issued)
+        self.assertIn("Secure", issued)
+
+    def test_expiry_blocks_data_and_clears_key(self):
+        session_id = self.store.session(self.cookie.split("=", 1)[1])
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        with self.store.db() as db:
+            db.execute("UPDATE session_auth SET expires_ms=? WHERE session_id=?", (0, session_id))
+        status, error, _ = self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)
+        self.assertEqual((status, error["error_code"]), (401, "SESSION_EXPIRED"))
+        self.assertIsNone(self.server.get_key(session_id))
+        restored, _ = self.login(cookie=self.cookie)
+        self.assertEqual(self.store.session(restored.split("=", 1)[1]), session_id)
+        self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[0], 401)
+
+    def test_bad_login_rate_limit_and_origin(self):
+        status, _, _ = self.post_json("/orderflow/api/login", {"password": TEST_PASSWORD},
+                                      cookie="", headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+        for _ in range(4):
+            status, data, _ = self.post_json("/orderflow/api/login", {"password": "wrong"}, cookie="")
+            self.assertEqual((status, data["error_code"]), (401, "INVALID_CREDENTIALS"))
+        status, data, _ = self.post_json("/orderflow/api/login", {"password": TEST_PASSWORD}, cookie="")
+        self.assertEqual((status, data["error_code"]), (429, "LOGIN_RATE_LIMITED"))
+        self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[0], 200)
+
+    def test_legacy_session_table_shape(self):
+        with self.store.db() as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(sessions)")]
+            self.assertEqual(columns, ["id", "token_hash", "created_ms"])
+            db.execute("INSERT INTO sessions VALUES (?,?,?)",
+                       (str(uuid.uuid4()), "legacy-token-hash", 123))
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions WHERE token_hash='legacy-token-hash'").fetchone()[0], 1)
+
     def test_loopback_only_and_idle_key_expiry(self):
         with self.assertRaises(ValueError):
-            AppServer(("0.0.0.0", 0), self.store, ORIGIN)
-        second_cookie = self.request("GET", "/orderflow/api/bootstrap", cookie="of_session=invalid")[2].split(";", 1)[0]
+            AppServer(("0.0.0.0", 0), self.store, ORIGIN, TEST_HASH)
+        second_cookie = self.login(cookie="of_session=invalid")[0]
         first = self.store.session(self.cookie.split("=", 1)[1])
         second = self.store.session(second_cookie.split("=", 1)[1])
         with patch("orderflow.app.KEY_TTL_SECONDS", 0.05):
@@ -88,7 +186,8 @@ class PublicAiTests(unittest.TestCase):
         self.server.clear_key(first)
 
     def test_host_origin_cookie_and_subpath(self):
-        self.assertEqual(self.request("GET", "/orderflow/api/health")[0], 200)
+        self.assertEqual(self.request("GET", "/orderflow/api/health")[0], 401)
+        self.assertEqual(self.request("GET", "/orderflow/api/health", cookie=self.cookie)[0], 200)
         self.assertEqual(self.request("GET", "/orderflow/")[0], 200)
         self.assertEqual(self.request("GET", "/orderflow")[0], 308)
         self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", headers={"Host": "evil.example"})[0], 403)
@@ -133,7 +232,7 @@ class PublicAiTests(unittest.TestCase):
 
     def test_new_server_does_not_restore_key(self):
         self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
-        newer = AppServer(("127.0.0.1", 0), self.store, ORIGIN)
+        newer = AppServer(("127.0.0.1", 0), self.store, ORIGIN, TEST_HASH)
         thread = threading.Thread(target=newer.serve_forever, daemon=True)
         thread.start()
         old_server = self.server
@@ -153,7 +252,7 @@ class PublicAiTests(unittest.TestCase):
         self.assertEqual(self.post_json("/orderflow/api/jobs", body)[1]["error_code"], "KEY_REQUIRED")
         status, response, _ = self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
         self.assertEqual((status, response["configured"]), (200, True))
-        second_cookie = self.request("GET", "/orderflow/api/bootstrap", cookie="of_session=invalid")[2].split(";", 1)[0]
+        second_cookie = self.login(cookie="of_session=invalid")[0]
         self.assertFalse(self.request("GET", "/orderflow/api/key", cookie=second_cookie)[1]["configured"])
         with patch.object(GeminiAdapter, "check_text", return_value=None):
             self.assertEqual(self.request("POST", "/orderflow/api/key/check", cookie=self.cookie)[0], 200)

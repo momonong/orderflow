@@ -9,7 +9,7 @@ const steps = Object.fromEntries(names.map((name) => [name, {status: "not_run"}]
 steps.page = {status: "pass"};
 steps.script = {status: "pass"};
 const testId = crypto.randomUUID();
-let version = "0.2.0";
+let version = "0.3.0";
 let maxBytes = 8 * 1024 * 1024;
 let documents = [];
 let jobs = [];
@@ -24,6 +24,47 @@ let uploadUnknown = false;
 let jobSubmitUnknown = false;
 let aiKeyConfigured = false;
 let keyBusy = false;
+
+function showLogin(message = "請輸入網站登入密碼，才能查看測試資料。") {
+  $("workspace").hidden = true;
+  $("login-section").hidden = false;
+  $("login-password").value = "";
+  $("ai-key").value = "";
+  $("report").value = "";
+  documents = [];
+  jobs = [];
+  currentDocument = null;
+  currentJob = null;
+  aiKeyConfigured = false;
+  setStatus("login-status", message);
+}
+async function login(event) {
+  event.preventDefault();
+  const password = $("login-password").value;
+  $("login-password").value = "";
+  $("login-button").disabled = true;
+  setStatus("login-status", "正在登入…", "working");
+  try {
+    await api("login", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password})});
+    location.reload();
+  } catch (error) {
+    const message = error.code === "LOGIN_RATE_LIMITED" ? "嘗試次數過多，請一分鐘後再試。"
+      : error.code === "INVALID_CREDENTIALS" ? "網站密碼不正確，請重新輸入。"
+      : "暫時無法登入，請稍後重試。";
+    setStatus("login-status", message, "fail");
+    $("login-button").disabled = false;
+  }
+}
+async function logout() {
+  $("logout-button").disabled = true;
+  try {
+    await api("logout", {method: "POST"});
+    location.reload();
+  } catch {
+    $("logout-button").disabled = false;
+    nextStep("登出尚未完成，請再試一次；暫時不要把裝置交給其他人。");
+  }
+}
 
 function setStatus(id, message, state = "") {
   const element = $(id);
@@ -130,7 +171,12 @@ async function api(path, options = {}, timeoutMs = 5000) {
     let data;
     try { data = await response.json(); }
     catch { throw {code: "BAD_JSON_RESPONSE", status: response.status}; }
-    if (!response.ok) throw {code: safeCode({code: data.error_code}, "HTTP_ERROR"), status: response.status};
+    if (!response.ok) {
+      if (response.status === 401 && path !== "login" && path !== "logout") {
+        showLogin(data.error_code === "SESSION_EXPIRED" ? "登入已過期，請重新輸入網站密碼。" : undefined);
+      }
+      throw {code: safeCode({code: data.error_code}, "HTTP_ERROR"), status: response.status};
+    }
     return {data, status: response.status};
   } catch (error) {
     if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true};
@@ -474,6 +520,8 @@ async function copyReport() {
   }
 }
 async function initialize() {
+  $("login-form").addEventListener("submit", login);
+  $("logout-button").addEventListener("click", logout);
   updateReport();
   const styleLoaded = getComputedStyle(document.querySelector("header")).backgroundColor !== "rgba(0, 0, 0, 0)";
   mark("style", styleLoaded ? "pass" : "fail", styleLoaded ? {} : {code: "STYLE_MISSING"});
@@ -491,6 +539,8 @@ async function initialize() {
   updateRealControls();
   try {
     const response = await api("bootstrap");
+    $("login-section").hidden = true;
+    $("workspace").hidden = false;
     version = response.data.version;
     maxBytes = response.data.max_pdf_bytes;
     documents = response.data.documents;
@@ -507,6 +557,7 @@ async function initialize() {
       setStatus("basic-status", "已找回先前的上傳紀錄；若要測新檔案，請先按「檢查連線」。");
     }
   } catch (error) {
+    if (error.status === 401) return;
     mark("api", error.unknown ? "unknown" : "fail", {code: safeCode(error, "BOOTSTRAP_FAILED")});
     setStatus("basic-status", "現在無法連上網站服務。請稍後重新整理；若仍失敗，請複製報告傳回提供連結的人。", "fail");
     nextStep("目前無法連線。稍後重新整理，或到步驟 4 複製報告。");

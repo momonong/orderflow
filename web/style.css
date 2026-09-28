@@ -44,3 +44,7 @@ footer { margin-top: 25px; color: #526576; }
 .real-ai h3 { margin-top: 0; }
 .real-ai input[type=password] { display: block; width: min(100%, 520px); margin: 8px 0 12px; padding: 10px; border: 1px solid #a8bbc6; border-radius: 6px; }
 .real-ai .privacy-note { margin: 14px 0; }
+
+[hidden] { display: none !important; }
+#login-password { display: block; width: min(100%, 520px); margin: 10px 0; padding: 11px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.logout-button { float: right; background: #526576; }

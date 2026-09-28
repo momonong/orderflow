@@ -8,6 +8,7 @@ Type=simple
 DynamicUser=yes
 StateDirectory=orderflow
 StateDirectoryMode=0700
+LoadCredential=login-auth:/etc/caddy/secrets/orderflow-auth.caddy
 WorkingDirectory=/opt/orderflow/current
 ExecStart=/opt/orderflow/current/.venv/bin/python -u -m orderflow.app --host 127.0.0.1 --port 18081 --data-dir /var/lib/orderflow --public-origin https://momonong.me
 Restart=on-failure

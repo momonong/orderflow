@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from contextlib import contextmanager
 import hashlib
 import http.cookies
@@ -24,9 +25,10 @@ from urllib.parse import urlsplit
 from pypdf import PdfReader
 
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
+from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PREFIX = "/orderflow/"
 MAX_PDF_BYTES = 8 * 1024 * 1024
 MAX_JSON_BYTES = 4096
@@ -40,6 +42,8 @@ MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
 MAX_JOBS_PER_DOCUMENT = 10
 MAX_ACTIVE_KEYS = 32
+SESSION_TTL_MS = 8 * 60 * 60 * 1000
+LOGIN_ATTEMPTS_PER_MINUTE = 5
 SAFE_AI_CODES = {"AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN"}
 
 
@@ -99,6 +103,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS sessions (
                   id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, created_ms INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS session_auth (
+                  session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+                  authenticated_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS documents (
                   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_key TEXT NOT NULL,
                   size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_ms INTEGER NOT NULL,
@@ -131,21 +139,72 @@ class Store:
         finally:
             db.close()
 
-    def session(self, token: str | None) -> str | None:
-        if not token:
-            return None
-        digest = hashlib.sha256(token.encode()).hexdigest()
-        with self.db() as db:
-            row = db.execute("SELECT id FROM sessions WHERE token_hash=?", (digest,)).fetchone()
-        return row["id"] if row else None
+    @staticmethod
+    def token_digest(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
 
-    def create_session(self) -> tuple[str, str]:
-        token = secrets.token_urlsafe(32)
-        session_id = str(uuid.uuid4())
+    def session_status(self, token: str | None) -> tuple[str | None, str]:
+        if not token:
+            return None, "AUTH_REQUIRED"
         with self.db() as db:
-            db.execute("INSERT INTO sessions VALUES (?, ?, ?)",
-                       (session_id, hashlib.sha256(token.encode()).hexdigest(), now_ms()))
-        return session_id, token
+            row = db.execute("SELECT s.id,a.authenticated_ms,a.expires_ms FROM sessions s "
+                             "LEFT JOIN session_auth a ON a.session_id=s.id WHERE s.token_hash=?",
+                             (self.token_digest(token),)).fetchone()
+        if not row:
+            return None, "AUTH_REQUIRED"
+        if row["authenticated_ms"] is None or row["expires_ms"] is None:
+            return row["id"], "AUTH_REQUIRED"
+        if row["expires_ms"] <= now_ms():
+            return row["id"], "SESSION_EXPIRED"
+        return row["id"], "ok"
+
+    def session(self, token: str | None) -> str | None:
+        session_id, status = self.session_status(token)
+        return session_id if status == "ok" else None
+
+    def authenticate(self, old_token: str | None) -> tuple[str, str, int]:
+        """Rotate even a legacy anonymous token while keeping its document owner."""
+        token = secrets.token_urlsafe(32)
+        timestamp = now_ms()
+        expires = timestamp + SESSION_TTL_MS
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT id FROM sessions WHERE token_hash=?",
+                                  (self.token_digest(old_token),)).fetchone() if old_token else None
+            if existing:
+                session_id = existing["id"]
+                db.execute("UPDATE sessions SET token_hash=? WHERE id=?",
+                           (self.token_digest(token), session_id))
+            else:
+                session_id = str(uuid.uuid4())
+                db.execute("INSERT INTO sessions VALUES (?,?,?)",
+                           (session_id, self.token_digest(token), timestamp))
+            db.execute("INSERT INTO session_auth (session_id,authenticated_ms,expires_ms) VALUES (?,?,?) "
+                       "ON CONFLICT(session_id) DO UPDATE SET authenticated_ms=excluded.authenticated_ms, "
+                       "expires_ms=excluded.expires_ms", (session_id, timestamp, expires))
+        return session_id, token, expires
+
+    def deauthenticate(self, old_token: str | None) -> tuple[str | None, str | None]:
+        """Invalidate the privileged token and retain an unprivileged browser owner."""
+        if not old_token:
+            return None, None
+        anonymous_token = secrets.token_urlsafe(32)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT id FROM sessions WHERE token_hash=?",
+                             (self.token_digest(old_token),)).fetchone()
+            if not row:
+                return None, None
+            session_id = row["id"]
+            db.execute("UPDATE sessions SET token_hash=? WHERE id=?",
+                       (self.token_digest(anonymous_token), session_id))
+            db.execute("DELETE FROM session_auth WHERE session_id=?", (session_id,))
+        return session_id, anonymous_token
+
+    def session_expires(self, session_id: str) -> int:
+        with self.db() as db:
+            row = db.execute("SELECT expires_ms FROM session_auth WHERE session_id=?", (session_id,)).fetchone()
+        return int(row["expires_ms"]) if row else 0
 
     def documents(self, session_id: str) -> list[dict]:
         with self.db() as db:
@@ -296,7 +355,8 @@ def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter) -> 
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], store: Store, public_origin: str | None = None):
+    def __init__(self, address: tuple[str, int], store: Store, public_origin: str | None,
+                 auth_hash: bytes):
         if address[0] != "127.0.0.1":
             raise ValueError("OrderFlow must bind to 127.0.0.1")
         if public_origin:
@@ -304,7 +364,12 @@ class AppServer(ThreadingHTTPServer):
             if (parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query
                     or parsed.fragment or parsed.username or parsed.password or parsed.port):
                 raise ValueError("public origin must be an HTTPS origin without a port or path")
+        if not isinstance(auth_hash, bytes) or not BCRYPT_HASH.fullmatch(auth_hash):
+            raise ValueError("valid login credential required")
         super().__init__(address, Handler)
+        self.auth_hash = auth_hash
+        self.login_times: deque[float] = deque()
+        self.login_lock = threading.Lock()
         self.store = store
         self.store.public_limits = bool(public_origin)
         self.upload_slots = threading.BoundedSemaphore(2)
@@ -318,6 +383,16 @@ class AppServer(ThreadingHTTPServer):
         self.key_stopping = False
         self.key_sweeper = threading.Thread(target=self._expire_keys, daemon=True)
         self.key_sweeper.start()
+
+    def allow_login_attempt(self) -> bool:
+        now = time.monotonic()
+        with self.login_lock:
+            while self.login_times and self.login_times[0] <= now - 60:
+                self.login_times.popleft()
+            if len(self.login_times) >= LOGIN_ATTEMPTS_PER_MINUTE:
+                return False
+            self.login_times.append(now)
+            return True
 
     def _prune_keys(self, now: float) -> None:
         for session_id, (_, expiry) in list(self.keys.items()):
@@ -371,15 +446,21 @@ class Handler(BaseHTTPRequestHandler):
         # Access logs could leak paths or headers. Operational logging needs a reviewed policy.
         pass
 
-    def json_response(self, status: int, value: object, cookie: str | None = None) -> None:
+    def json_response(self, status: int, value: object, cookie: str | None = None,
+                      clear_cookie: bool = False) -> None:
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        if cookie:
-            self.send_header("Set-Cookie", f"of_session={cookie}; Path={PREFIX}; HttpOnly; SameSite=Strict" + ("; Secure" if self.server.public_origin else ""))
+        if cookie or clear_cookie:
+            value = f"of_session={cookie or ''}; Path={PREFIX}; HttpOnly; SameSite=Strict"
+            if clear_cookie:
+                value += "; Max-Age=0"
+            if self.server.public_origin:
+                value += "; Secure"
+            self.send_header("Set-Cookie", value)
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -390,19 +471,21 @@ class Handler(BaseHTTPRequestHandler):
     def error(self, status: int, code: str) -> None:
         self.json_response(status, {"error_code": code})
 
-    def session_id(self) -> str | None:
+    def session_token(self) -> str | None:
         try:
             cookies = http.cookies.SimpleCookie()
             cookies.load(self.headers.get("Cookie", ""))
-            token = cookies["of_session"].value if "of_session" in cookies else None
+            return cookies["of_session"].value if "of_session" in cookies else None
         except http.cookies.CookieError:
-            token = None
-        return self.server.store.session(token)
+            return None
 
     def get_session(self) -> str | None:
-        session_id = self.session_id()
-        if not session_id:
-            self.error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+        session_id, status = self.server.store.session_status(self.session_token())
+        if status != "ok":
+            if status == "SESSION_EXPIRED" and session_id:
+                self.server.clear_key(session_id)
+            self.error(HTTPStatus.UNAUTHORIZED, status)
+            return None
         return session_id
 
     def read_body(self, length: int, seconds: float) -> bytes:
@@ -480,18 +563,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if path == PREFIX + "api/health":
+            if not self.get_session():
+                return
             self.json_response(200, {"status": "ok", "version": VERSION, "mode": "mock-and-real"})
             return
         if path == PREFIX + "api/bootstrap":
-            session_id = self.session_id()
-            cookie = None
+            session_id = self.get_session()
             if not session_id:
-                session_id, cookie = self.server.store.create_session()
+                return
             self.json_response(200, {"version": VERSION, "max_pdf_bytes": MAX_PDF_BYTES,
                                      "mode": "mock-and-real", "documents": self.server.store.documents(session_id),
                                      "jobs": self.server.store.jobs(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
-                                     "ai_model": GEMINI_MODEL}, cookie)
+                                     "ai_model": GEMINI_MODEL,
+                                     "auth_expires_ms": self.server.store.session_expires(session_id)})
             return
         if path == PREFIX + "api/key":
             session_id = self.get_session()
@@ -516,7 +601,34 @@ class Handler(BaseHTTPRequestHandler):
             job = self.server.store.job(session_id, job_id)
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
             return
+        if path.startswith(PREFIX + "api/") and not self.get_session():
+            return
         self.error(404, "NOT_FOUND")
+
+    def login(self) -> None:
+        if not self.server.allow_login_attempt():
+            self.error(HTTPStatus.TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED")
+            return
+        value = self.get_json()
+        if value is None:
+            return
+        if not verify_password(value.get("password"), self.server.auth_hash):
+            self.error(HTTPStatus.UNAUTHORIZED, "INVALID_CREDENTIALS")
+            return
+        old_token = self.session_token()
+        old_session_id, _ = self.server.store.session_status(old_token)
+        session_id, token, expires = self.server.store.authenticate(old_token)
+        if old_session_id:
+            self.server.clear_key(old_session_id)
+        self.json_response(200, {"status": "ok", "auth_expires_ms": expires}, token)
+
+    def logout(self) -> None:
+        session_id, token = self.server.store.deauthenticate(self.session_token())
+        if session_id:
+            self.server.clear_key(session_id)
+            self.json_response(200, {"status": "signed_out"}, token)
+        else:
+            self.json_response(200, {"status": "signed_out"}, clear_cookie=True)
 
     def do_POST(self) -> None:
         if not self.valid_host() or not self.valid_origin():
@@ -525,6 +637,12 @@ class Handler(BaseHTTPRequestHandler):
         # A custom header blocks ordinary cross-site forms; no CORS headers are served.
         if self.headers.get("X-Orderflow-Request") != "1":
             self.error(403, "REQUEST_HEADER_REQUIRED")
+            return
+        if path == PREFIX + "api/login":
+            self.login()
+            return
+        if path == PREFIX + "api/logout":
+            self.logout()
             return
         session_id = self.get_session()
         if not session_id:
@@ -617,6 +735,18 @@ class Handler(BaseHTTPRequestHandler):
         self.server.clear_key(session_id)
         self.json_response(200, {"configured": False, "model": GEMINI_MODEL})
 
+    def _unsupported_api_method(self) -> None:
+        if not self.valid_host():
+            return
+        if urlsplit(self.path).path.startswith(PREFIX + "api/") and not self.get_session():
+            return
+        self.error(HTTPStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
+
+    do_PUT = _unsupported_api_method
+    do_PATCH = _unsupported_api_method
+    do_OPTIONS = _unsupported_api_method
+    do_HEAD = _unsupported_api_method
+
     def upload(self, session_id: str) -> None:
         if not self.server.public_origin:
             self._upload_impl(session_id)
@@ -691,10 +821,19 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=ROOT / ".local-data")
     parser.add_argument("--public-origin", help="HTTPS origin allowed through a same-host loopback proxy")
+    parser.add_argument("--auth-file", type=Path, help="Caddy bcrypt credential file for local testing")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         parser.error("This PoC is loopback-only; public access requires a separate security decision")
-    server = AppServer((args.host, args.port), Store(args.data_dir), args.public_origin)
+    credential_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    auth_file = args.auth_file or (Path(credential_dir) / "login-auth" if credential_dir else None)
+    if not auth_file:
+        parser.error("login credential required")
+    try:
+        auth_hash = load_caddy_hash(auth_file)
+    except (OSError, ValueError):
+        parser.error("login credential unavailable or invalid")
+    server = AppServer((args.host, args.port), Store(args.data_dir), args.public_origin, auth_hash)
     print(f"OrderFlow {VERSION} at http://{args.host}:{server.server_port}{PREFIX}")
     try:
         server.serve_forever()

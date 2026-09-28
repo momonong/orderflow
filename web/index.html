@@ -14,6 +14,18 @@
       <h1>試試 PDF 能否上傳並顯示結果</h1>
       <p>照下面 4 個步驟操作，就能知道測試走到哪裡。<strong>模擬測試使用固定範例；真正辨識需另外設定金鑰，並確認把 PDF 送給 Google。</strong></p>
     </header>
+    <section id="login-section" aria-labelledby="login-title" hidden>
+      <h2 id="login-title">網站登入</h2>
+      <p>請使用提供連結的人交給你的網站密碼。這組密碼只用於登入網站，與 Google AI Studio API key 不同。</p>
+      <form id="login-form">
+        <label for="login-password">網站密碼</label>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+        <button id="login-button" type="submit">登入網站</button>
+      </form>
+      <p id="login-status" class="status" role="status">請輸入網站密碼。</p>
+    </section>
+    <div id="workspace" hidden>
+      <button id="logout-button" type="button" class="logout-button">登出網站</button>
     <p id="next-step" class="next-step" role="status">現在請先按「檢查連線」。</p>
     <aside class="privacy-note">
       <strong>請只用沒有客戶或個人資料的測試 PDF。</strong>
@@ -83,6 +95,7 @@
       <p class="hint">如果整個網站無法打開，請截下瀏覽器錯誤畫面並記下發生時間，再傳給提供連結的人。</p>
     </section>
     <footer>真正的 AI 結果需人工核對；公司網路與正式使用仍需另外確認。</footer>
+    </div>
   </main>
 </body>
 </html>

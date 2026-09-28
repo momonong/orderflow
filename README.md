@@ -8,25 +8,25 @@
 
 ```bash
 uv sync --locked
-uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data
+uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --auth-file /path/to/local-caddy-auth.caddy
 ```
 
-瀏覽 `http://127.0.0.1:8765/orderflow/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
+`--auth-file` 需為含單一 `orderflow` 帳號與 bcrypt hash 的 Caddy `basic_auth` 區塊；缺少或格式錯誤會拒絕啟動。正式服務從 systemd `LoadCredential` 讀取同一 hash，不讀明文密碼檔。瀏覽 `http://127.0.0.1:8765/orderflow/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
 
 ## 使用方式
 
-1. 檢查網站連線，只用沒有客戶或個人資料、且已獲准外傳的測試 PDF。
+1. 先使用提供的網站密碼登入，再檢查網站連線，只用沒有客戶或個人資料、且已獲准外傳的測試 PDF。
 2. 選檔，確認後上傳；PDF 保存在網站主機的資料目錄，不只在瀏覽器。
 3. 可先按「模擬測試」檢查畫面；如需真正辨識，設定自己的 AI Studio key，可先做文字連線檢查，再另外確認把 PDF 送給 Google。文字成功不代表 PDF 辨識成功。
 4. 核對辨識品項並複製診斷報告。報告不含 API key、PDF 內容、檔名或辨識品項。
 
-金鑰只保存在單一服務程序的記憶體，設定 15 分鐘後失效；清除或程序重啟後需重新輸入。已開始的 Google 請求不能撤回；結果不明時不自動重送。session cookie 為隨機秘密，資料庫只保存其雜湊；金鑰不寫入資料庫、cookie、報告或日誌。此機制不是正式登入。
+金鑰只保存在單一服務程序的記憶體，設定 15 分鐘後失效；清除或程序重啟後需重新輸入。已開始的 Google 請求不能撤回；結果不明時不自動重送。session cookie 為隨機秘密，資料庫只保存其雜湊；金鑰不寫入資料庫、cookie、報告或日誌。網站登入有效期 8 小時；登出會換成無權限 cookie，重新登入同一瀏覽器可取回該 session 的文件與工作。清除 cookie 或更換瀏覽器不保證取回。這是單一共用測試帳號，不是正式多使用者授權。
 
 ## 公開測試邊界
 
-正式公開入口的路由、認證與操作由 `selfhost-servers` 專案管理。此服務仍只綁 loopback；使用 `--public-origin https://momonong.me` 時，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 增加 `Secure`。入口需對 `/orderflow` 與 `/orderflow/*` 執行獨立認證並保留前綴；不得讓匿名用戶直連上傳 API。應用不信任任意客戶端提供的代理標頭，也不從前端接受任意 Google URL 或模型 ID。健康檢查為 `/orderflow/api/health`。
+正式公開入口的路由、認證與操作由 `selfhost-servers` 專案管理。此服務仍只綁 loopback；使用 `--public-origin https://momonong.me` 時，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 增加 `Secure`。切換後，入口保留 `/orderflow` 前綴與 HTTPS，應用對所有 API 資料與操作驗證 session；匿名只可讀登入頁與靜態資源。應用認證通過正式驗證前，HP 的 Caddy Basic Auth 維持啟用。應用不信任任意客戶端提供的代理標頭，也不從前端接受任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。
 
-公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。應用 service unit 候選檔見 `deploy/orderflow.service`：以 systemd `DynamicUser` 專屬身份執行、`StateDirectory` 保存 0700 資料，程式碼在 root 擁有的 `/opt/orderflow/current` 唯讀使用，服務禁止讀取一般使用者家目錄。實際入口與 systemd 狀態依部署後驗證紀錄判定。HP 首次安裝腳本為 `deploy/install-hp.sh`，只接受已在 `/home/morris/orderflow-staging/<commit>` 準備並以逐檔雜湊校驗的版本；需停止測試程序讓 18081 空出後，由管理員以 `sudo sh deploy/install-hp.sh <commit>` 執行。失敗時移除新建 unit 與 current 連結，保留 release 供診斷，不刪資料。
+公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。應用 service unit 候選檔見 `deploy/orderflow.service`：以 systemd `DynamicUser` 專屬身份執行、`StateDirectory` 保存 0700 資料，程式碼在 root 擁有的 `/opt/orderflow/current` 唯讀使用，服務禁止讀取一般使用者家目錄。實際入口與 systemd 狀態依部署後驗證紀錄判定。HP 現有 v0.2 服務只可用 `deploy/upgrade-hp.sh <commit>` 升級；`deploy/install-hp.sh` 是首次安裝的歷史腳本，不可在現有主機重跑。升級腳本要求逐檔雜湊驗證過的 staging release、既有 Caddy Basic Auth、既有 credential；停止服務後備份原 unit 與整個資料目錄，再切換 symlink/unit。失敗會復原舊 app 與 unit，不刪新資料；備份保留。`sessions` 三欄維持舊版格式，新的認證狀態獨立於 `session_auth`，供舊版 app 回退使用。Caddy 切換與回退依 selfhost-servers 的 OrderFlow 部署文件操作；如需回退舊 app，先恢復 Caddy Basic Auth。
 
 ## 驗證
 

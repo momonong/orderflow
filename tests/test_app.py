@@ -12,6 +12,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+import bcrypt
+
 from orderflow.app import AppServer, MAX_PDF_BYTES, Store
 from orderflow.ai import AIError, AIUnknown
 from pypdf import PdfWriter
@@ -22,18 +24,28 @@ writer.add_metadata({"/Title": "PRIVATE_CUSTOMER_MARKER"})
 buffer = io.BytesIO()
 writer.write(buffer)
 PDF = buffer.getvalue()
+TEST_PASSWORD = "test-password"
+TEST_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt(rounds=4))
 
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.tmp.name))
-        self.server = AppServer(("127.0.0.1", 0), self.store)
+        self.server = AppServer(("127.0.0.1", 0), self.store, None, TEST_HASH)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.cookie = self.bootstrap()
 
     def tearDown(self):
+        # Request handlers may finish before their background recognition thread.
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            with self.store.db() as db:
+                active = db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+            if not active:
+                break
+            time.sleep(0.05)
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
@@ -56,11 +68,19 @@ class ApiTests(unittest.TestCase):
         conn.close()
         return result
 
+    def login(self, cookie=""):
+        status, data, issued = self.request("POST", "/orderflow/api/login",
+                                            json.dumps({"password": TEST_PASSWORD}),
+                                            {"Content-Type": "application/json"}, cookie=cookie)
+        self.assertEqual((status, data["status"]), (200, "ok"))
+        return issued.split(";", 1)[0]
+
     def bootstrap(self):
-        status, data, cookie = self.request("GET", "/orderflow/api/bootstrap")
+        cookie = self.login()
+        status, data, _ = self.request("GET", "/orderflow/api/bootstrap", cookie=cookie)
         self.assertEqual(status, 200)
         self.assertEqual(data["mode"], "mock-and-real")
-        return cookie.split(";", 1)[0]
+        return cookie
 
     def upload(self, data=PDF, key=None, sha=None, declared=None, cookie=None):
         return self.request("POST", "/orderflow/api/documents", data, {
@@ -92,7 +112,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("中文 <測試>", self.request("GET", "/orderflow/api/sample")[1]["rows"][0]["description"])
         doc = self.upload()[1]
         job = self.submit(doc["id"])[1]
-        second_cookie = self.request("GET", "/orderflow/api/bootstrap", cookie="of_session=invalid")[2].split(";", 1)[0]
+        second_cookie = self.login(cookie="of_session=invalid")
         status, second, _ = self.request("GET", "/orderflow/api/bootstrap", cookie=second_cookie)
         self.assertEqual((status, second["documents"], second["jobs"]), (200, [], []))
         self.assertEqual(self.request("GET", "/orderflow/api/jobs/" + job["id"], cookie=second_cookie)[0], 404)
