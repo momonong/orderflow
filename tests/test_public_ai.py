@@ -209,6 +209,12 @@ class PublicAiTests(unittest.TestCase):
                 "document_id": document["id"], "request_key": str(uuid.uuid4()), "scenario": "success"})
             self.assertEqual((status, error["error_code"]), (429, "JOB_LIMIT"))
 
+    def test_google_protocol_error_returns_safe_json(self):
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        with patch("orderflow.gemini.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"", 1)):
+            status, error, _ = self.request("POST", "/orderflow/api/key/check", cookie=self.cookie)
+        self.assertEqual((status, error["error_code"]), (502, "AI_HTTP_UNKNOWN"))
+
     def test_safe_api_error_codes(self):
         self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
         with patch.object(GeminiAdapter, "check_text", side_effect=AIError("AI_AUTH_FAILED")):
@@ -311,6 +317,10 @@ class GeminiAdapterTests(unittest.TestCase):
             with self.assertRaises(AIUnknown) as caught:
                 _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
             self.assertEqual(caught.exception.code, "AI_TIMEOUT_UNKNOWN")
+        with patch("orderflow.gemini.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"", 1)):
+            with self.assertRaises(AIUnknown) as caught:
+                _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
+            self.assertEqual(caught.exception.code, "AI_HTTP_UNKNOWN")
         class BadResponse:
             def __enter__(self): return self
             def __exit__(self, *args): return None

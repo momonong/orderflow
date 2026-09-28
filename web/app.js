@@ -159,7 +159,15 @@ function safeCode(error, fallback) {
   const code = error?.code || fallback;
   return /^[A-Z0-9_]{2,40}$/.test(code) ? code : fallback;
 }
+function responseTypeHint(value) {
+  const type = (value || "").split(";", 1)[0].trim().toLowerCase();
+  if (type === "application/json" || type.endsWith("+json")) return "JSON";
+  if (type === "text/html") return "HTML";
+  if (type === "text/plain") return "TEXT";
+  return type ? "OTHER" : "MISSING";
+}
 async function api(path, options = {}, timeoutMs = 5000) {
+  const started = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -170,7 +178,8 @@ async function api(path, options = {}, timeoutMs = 5000) {
     });
     let data;
     try { data = await response.json(); }
-    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status}; }
+    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status,
+                   responseType: responseTypeHint(response.headers.get("Content-Type"))}; }
     if (!response.ok) {
       if (response.status === 401 && path !== "login" && path !== "logout") {
         showLogin(data.error_code === "SESSION_EXPIRED" ? "登入已過期，請重新輸入網站密碼。" : undefined);
@@ -179,9 +188,10 @@ async function api(path, options = {}, timeoutMs = 5000) {
     }
     return {data, status: response.status};
   } catch (error) {
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true};
-    if (error?.code) throw error;
-    throw {code: "NETWORK_ERROR", unknown: true};
+    const ms = Math.round(performance.now() - started);
+    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true, ms};
+    if (error?.code) throw {...error, ms};
+    throw {code: "NETWORK_ERROR", unknown: true, ms};
   } finally { clearTimeout(timer); }
 }
 function renderRows(tbody, rows) {
@@ -214,6 +224,7 @@ function updateReport() {
     const extras = [];
     if (entry.ms !== undefined) extras.push(`${entry.ms} ms`);
     if (entry.http !== undefined) extras.push(`HTTP ${entry.http}`);
+    if (entry.responseType) extras.push(`回應類型 ${entry.responseType}`);
     if (entry.code) extras.push(entry.code);
     lines.push(`- ${titles[name]}：${labels[entry.status]}${extras.length ? "（" + extras.join("，") + "）" : ""}`);
   }
@@ -453,8 +464,10 @@ async function checkKey() {
     setStatus("check-status", "文字連線成功；這還不能證明 PDF 辨識成功。", "pass");
   } catch (error) {
     if (error.code === "KEY_REQUIRED") aiKeyConfigured = false;
-    const uncertain = error.unknown || ["AI_HTTP_UNKNOWN", "AI_TIMEOUT_UNKNOWN"].includes(error.code);
-    mark("text_check", uncertain ? "unknown" : "fail", {code: safeCode(error, "AI_HTTP_UNKNOWN")});
+    const uncertain = error.unknown || ["AI_HTTP_UNKNOWN", "AI_TIMEOUT_UNKNOWN",
+      "BAD_JSON_RESPONSE", "HTTP_ERROR"].includes(error.code);
+    mark("text_check", uncertain ? "unknown" : "fail", {code: safeCode(error, "AI_HTTP_UNKNOWN"),
+      http: error.status, ms: error.ms, responseType: error.responseType});
     setStatus("check-status", keyAdvice(safeCode(error, "AI_HTTP_UNKNOWN")), uncertain ? "unknown" : "fail");
   } finally { keyBusy = false; updateRealControls(); }
 }

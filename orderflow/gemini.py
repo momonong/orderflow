@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 from pathlib import Path
 import urllib.error
@@ -53,6 +54,10 @@ def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool) 
             raise AIError("AI_BAD_REQUEST") from None
         if exc.code == 404:
             raise AIError("AI_MODEL_UNAVAILABLE") from None
+        raise AIUnknown("AI_HTTP_UNKNOWN") from None
+    except http.client.HTTPException:
+        # A partial or malformed upstream HTTP response can arrive after the
+        # request was processed. Keep the outcome unknown and return safe JSON.
         raise AIUnknown("AI_HTTP_UNKNOWN") from None
     except (OSError, TimeoutError):
         raise AIUnknown("AI_TIMEOUT_UNKNOWN") from None
