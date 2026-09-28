@@ -59,7 +59,7 @@ class ApiTests(unittest.TestCase):
     def bootstrap(self):
         status, data, cookie = self.request("GET", "/orderflow/api/bootstrap")
         self.assertEqual(status, 200)
-        self.assertEqual(data["mode"], "mock")
+        self.assertEqual(data["mode"], "mock-and-real")
         return cookie.split(";", 1)[0]
 
     def upload(self, data=PDF, key=None, sha=None, declared=None, cookie=None):

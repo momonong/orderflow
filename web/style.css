@@ -39,3 +39,8 @@ textarea { display: block; width: 100%; margin-top: 12px; padding: 12px; font: 1
 #report-section.ready .copy-button { background: #126c51; }
 footer { margin-top: 25px; color: #526576; }
 @media (max-width: 600px) { header, section { padding: 18px; } h2 { font-size: 1.15rem; } }
+
+.real-ai { margin-top: 22px; padding: 18px; border: 1px solid #b7cfdb; border-radius: 10px; background: #f8fbfd; }
+.real-ai h3 { margin-top: 0; }
+.real-ai input[type=password] { display: block; width: min(100%, 520px); margin: 8px 0 12px; padding: 10px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.real-ai .privacy-note { margin: 14px 0; }

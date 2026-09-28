@@ -12,7 +12,7 @@
     <header>
       <p class="eyebrow">OrderFlow · 示範測試</p>
       <h1>試試 PDF 能否上傳並顯示結果</h1>
-      <p>照下面 4 個步驟操作，就能知道這次測試走到哪裡。現在的讀取結果是固定範例，<strong>不會呼叫真正的 AI，也不會讀取 PDF 內容來產生結果。</strong></p>
+      <p>照下面 4 個步驟操作，就能知道測試走到哪裡。<strong>模擬測試使用固定範例；真正辨識需另外設定金鑰，並確認把 PDF 送給 Google。</strong></p>
     </header>
     <p id="next-step" class="next-step" role="status">現在請先按「檢查連線」。</p>
     <aside class="privacy-note">
@@ -43,11 +43,26 @@
     </section>
 
     <section aria-labelledby="ai-title">
-      <h2 id="ai-title"><span class="step-number">3</span> 看看範例結果能否顯示</h2>
-      <p>上傳成功後，另外按一次才開始。這是<strong>模擬測試</strong>：顯示固定範例，與你上傳的 PDF 內容無關，也不會傳給真正的 AI。</p>
+      <h2 id="ai-title"><span class="step-number">3</span> 選擇模擬或真正 AI 辨識</h2>
+      <p>先試上方的<strong>模擬測試</strong>也可以：它顯示固定範例，與 PDF 內容無關，不會呼叫 Google。</p>
       <button id="recognize-button" type="button" disabled>開始模擬測試</button>
       <p id="ai-status" class="status" role="status">請先完成上傳。</p>
-      <div class="table-wrap"><table><thead><tr><th>固定範例品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
+      <p id="result-mode" class="hint">尚未產生結果。</p>
+      <div class="table-wrap"><table><thead><tr><th>品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
+      <div class="real-ai">
+        <h3>若要測真正的 PDF 辨識</h3>
+        <p>先設定你自己的 Google AI Studio API key。金鑰只暫存在這台網站主機的記憶體，15 分鐘後失效；不會寫入報告或資料庫。重新啟動後需重新輸入。</p>
+        <label for="ai-key">Google AI Studio API key</label>
+        <input id="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="貼上 API key">
+        <button id="save-key" type="button">設定金鑰</button>
+        <button id="clear-key" type="button" disabled>清除金鑰</button>
+        <p id="key-status" class="status" role="status">尚未設定金鑰；仍可使用上方模擬測試。</p>
+        <button id="check-key" type="button" disabled>先測文字連線</button>
+        <p id="check-status" class="status" role="status">文字測試只確認金鑰、模型與連線，不能證明 PDF 辨識成功。</p>
+        <p class="privacy-note"><strong>真正辨識會把這份 PDF 傳給 Google，可能使用你的 API 額度。</strong>請只使用已獲准外傳、沒有客戶或個資的測試文件；每次辨識都需另外確認。</p>
+        <button id="real-button" type="button" disabled>把這份 PDF 交給 Google 辨識</button>
+        <p id="real-status" class="status" role="status">請先上傳測試 PDF 並設定金鑰。</p>
+      </div>
       <details id="advanced-tests">
         <summary>進階：模擬失敗或重新測試</summary>
         <p>只有在提供連結的人請你排查問題時，才需要使用這裡。</p>
@@ -67,7 +82,7 @@
       </details>
       <p class="hint">如果整個網站無法打開，請截下瀏覽器錯誤畫面並記下發生時間，再傳給提供連結的人。</p>
     </section>
-    <footer>這是示範測試頁。真正的 AI、公司網路與正式使用仍需另外確認。</footer>
+    <footer>真正的 AI 結果需人工核對；公司網路與正式使用仍需另外確認。</footer>
   </main>
 </body>
 </html>
