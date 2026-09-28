@@ -154,7 +154,7 @@ async function upload() {
   const file = $("pdf-file").files[0];
   if (!file) { $("upload-status").textContent = "請先選擇 PDF"; return; }
   if (file.size > maxBytes) { mark("upload", "fail", {code: "FILE_TOO_LARGE"}); $("upload-status").textContent = "超過 8 MiB 上限"; return; }
-  if (file.size < 1 || file.type !== "application/pdf") { mark("upload", "fail", {code: "PDF_REQUIRED"}); $("upload-status").textContent = "請選擇有效 PDF"; return; }
+  if (file.size < 1) { mark("upload", "fail", {code: "PDF_REQUIRED"}); $("upload-status").textContent = "請選擇非空的 PDF"; return; }
   if (!window.confirm(`確定上傳這份 ${file.size} bytes 的去識別測試 PDF？`)) return;
   uploadBusy = true;
   $("upload-button").disabled = true;

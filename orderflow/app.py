@@ -34,6 +34,11 @@ JSON_DEADLINE_SECONDS = 5
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "web"
 SCENARIOS = {"success", "fail", "timeout", "invalid"}
+SAFE_AI_CODES = {"AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE"}
+
+
+def safe_ai_code(code: str, fallback: str) -> str:
+    return code if code in SAFE_AI_CODES else fallback
 
 
 def now_ms() -> int:
@@ -249,10 +254,10 @@ def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter) -> 
         store.set_job(job_id, state="done", result=rows, steps={"ai": "pass", "format": "pass"},
                       finished_ms=now_ms())
     except AIUnknown as exc:
-        store.set_job(job_id, state="unknown", error_code=exc.code,
+        store.set_job(job_id, state="unknown", error_code=safe_ai_code(exc.code, "AI_RESULT_UNKNOWN"),
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
     except AIError as exc:
-        store.set_job(job_id, state="failed", error_code=exc.code,
+        store.set_job(job_id, state="failed", error_code=safe_ai_code(exc.code, "AI_FAILURE"),
                       steps={"ai": "fail", "format": "not_run"}, finished_ms=now_ms())
     except ValueError:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
@@ -288,7 +293,11 @@ class Handler(BaseHTTPRequestHandler):
         if cookie:
             self.send_header("Set-Cookie", f"of_session={cookie}; Path={PREFIX}; HttpOnly; SameSite=Strict")
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The request may already be committed; the client can query or replay its key.
+            pass
 
     def error(self, status: int, code: str) -> None:
         self.json_response(status, {"error_code": code})
@@ -440,8 +449,8 @@ class Handler(BaseHTTPRequestHandler):
             except LookupError:
                 self.error(404, "DOCUMENT_NOT_FOUND")
                 return
-            except ValueError as exc:
-                self.error(409, str(exc))
+            except ValueError:
+                self.error(409, "IDEMPOTENCY_CONFLICT")
                 return
             if created:
                 threading.Thread(target=run_job, args=(self.server.store, job["id"], document_id,
@@ -499,8 +508,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             doc = self.server.store.add_document(session_id, key, data, calculated,
                                                  int((time.monotonic() - start) * 1000), page_count)
-        except ValueError as exc:
-            self.error(409, str(exc))
+        except ValueError:
+            self.error(409, "IDEMPOTENCY_CONFLICT")
             return
         self.json_response(201, doc)
 

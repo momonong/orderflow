@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from orderflow.app import AppServer, MAX_PDF_BYTES, Store
+from orderflow.ai import AIError, AIUnknown
 from pypdf import PdfWriter
 
 writer = PdfWriter()
@@ -96,6 +97,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((status, second["documents"], second["jobs"]), (200, [], []))
         self.assertEqual(self.request("GET", "/orderflow/api/jobs/" + job["id"], cookie=second_cookie)[0], 404)
         self.assertEqual(self.submit(doc["id"], cookie=second_cookie)[0], 404)
+        self.assertEqual(self.request("GET", "/orderflow/api/jobs/" + str(uuid.uuid4()))[0], 404)
+        self.assertEqual(self.request("GET", "/orderflow/../../local-data")[0], 404)
 
     def test_upload_validation_and_receipt(self):
         status, doc, _ = self.upload()
@@ -104,6 +107,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(doc["page_count"], 1)
         self.assertEqual(doc["sha256"], hashlib.sha256(PDF).hexdigest())
         self.assertEqual((Path(self.tmp.name) / "files" / (doc["id"] + ".pdf")).read_bytes(), PDF)
+        self.assertEqual(self.upload(b"")[1]["error_code"], "BAD_SIZE")
         self.assertEqual(self.upload(b"not a PDF")[1]["error_code"], "PDF_INVALID")
         self.assertEqual(self.upload(b"%PDF-1.4\n%%EOF")[1]["error_code"], "PDF_INVALID")
         self.assertEqual(self.upload(sha="0" * 64)[1]["error_code"], "HASH_MISMATCH")
@@ -113,6 +117,7 @@ class ApiTests(unittest.TestCase):
         status, data, _ = self.request("POST", "/orderflow/api/documents", b"", {"Content-Length": str(MAX_PDF_BYTES + 1), "Content-Type": "application/pdf", "X-File-Size": str(MAX_PDF_BYTES + 1), "X-File-SHA256": "0" * 64, "X-Request-Key": str(uuid.uuid4())})
         self.assertEqual((status, data["error_code"]), (413, "FILE_TOO_LARGE"))
         self.assertNotIn("PRIVATE_CUSTOMER_MARKER", json.dumps(doc))
+        self.assertEqual(len(list((Path(self.tmp.name) / "files").iterdir())), 1)
 
     def test_idempotency_attempts_failures_and_restore(self):
         key = str(uuid.uuid4())
@@ -180,6 +185,71 @@ class ApiTests(unittest.TestCase):
     def test_host_header_rejected(self):
         status, data, _ = self.request("GET", "/orderflow/api/bootstrap", headers={"Host": "other.example"})
         self.assertEqual((status, data["error_code"]), (403, "HOST_NOT_ALLOWED"))
+
+    def test_exact_pdf_limit_and_encrypted_rejection(self):
+        def sized_pdf(title_size):
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            writer.add_metadata({"/Title": "X" * title_size})
+            buffer = io.BytesIO()
+            writer.write(buffer)
+            return buffer.getvalue()
+        base_size = len(sized_pdf(0))
+        title_size = MAX_PDF_BYTES - base_size
+        candidate = sized_pdf(title_size)
+        candidate = sized_pdf(title_size - (len(candidate) - MAX_PDF_BYTES))
+        self.assertEqual(len(candidate), MAX_PDF_BYTES)
+        status, doc, _ = self.upload(candidate)
+        self.assertEqual((status, doc["page_count"]), (201, 1))
+        writer = PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        writer.encrypt("test-password")
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        status, data, _ = self.upload(buffer.getvalue())
+        self.assertEqual((status, data["error_code"]), (415, "PDF_INVALID"))
+        self.assertEqual(len(list((Path(self.tmp.name) / "files").iterdir())), 1)
+
+    def test_lost_upload_response_same_key(self):
+        key = str(uuid.uuid4())
+        sock = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2)
+        request = ("POST /orderflow/api/documents HTTP/1.1\r\n"
+                   f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+                   f"Cookie: {self.cookie}\r\n"
+                   "X-Orderflow-Request: 1\r\n"
+                   "Content-Type: application/pdf\r\n"
+                   f"Content-Length: {len(PDF)}\r\n"
+                   f"X-File-Size: {len(PDF)}\r\n"
+                   f"X-File-SHA256: {hashlib.sha256(PDF).hexdigest()}\r\n"
+                   f"X-Request-Key: {key}\r\n\r\n").encode()
+        sock.sendall(request + PDF)
+        sock.close()  # Deliberately discard the receipt after sending the full body.
+        session_id = self.store.session(self.cookie.split("=", 1)[1])
+        for _ in range(30):
+            documents = self.store.documents(session_id)
+            if documents:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(documents), 1)
+        status, replay, _ = self.upload(key=key)
+        self.assertEqual((status, replay["id"]), (201, documents[0]["id"]))
+        self.assertEqual(len(self.store.documents(session_id)), 1)
+
+    def test_adapter_error_codes_are_sanitized(self):
+        doc = self.upload()[1]
+        class LeakyAdapter:
+            def __init__(self, scenario):
+                self.scenario = scenario
+            def recognize(self, pdf_path, *, deadline_seconds):
+                if self.scenario == "timeout":
+                    raise AIUnknown("RAW_AI_RESPONSE PRIVATE_CUSTOMER")
+                raise AIError("RAW_AI_RESPONSE PRIVATE_CUSTOMER")
+        self.server.adapter_factory = LeakyAdapter
+        failed = self.wait_job(self.submit(doc["id"], "fail")[1]["id"])
+        unknown = self.wait_job(self.submit(doc["id"], "timeout")[1]["id"])
+        self.assertEqual((failed["state"], failed["error_code"]), ("failed", "AI_FAILURE"))
+        self.assertEqual((unknown["state"], unknown["error_code"]), ("unknown", "AI_RESULT_UNKNOWN"))
+        self.assertNotIn("PRIVATE_CUSTOMER", json.dumps(self.request("GET", "/orderflow/api/bootstrap")[1]))
 
     def test_parallel_same_key(self):
         from concurrent.futures import ThreadPoolExecutor
