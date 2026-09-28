@@ -2,6 +2,7 @@
 import hashlib
 import runpy
 import sys
+import stat
 from pathlib import Path
 import shutil
 import sqlite3
@@ -16,6 +17,27 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_copied_private_stage_is_traversable_by_service_account(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        sys.path.insert(0, str(deploy_dir))
+        try:
+            finalize = runpy.run_path(str(deploy_dir / "import-asus-state.py"))["make_release_traversable"]
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as root:
+            stage = Path(root) / "stage"
+            nested = stage / "orderflow"
+            nested.mkdir(parents=True)
+            nested.chmod(0o775)
+            (nested / "app.py").write_text("fixture\n")
+            stage.chmod(0o700)
+            release = Path(root) / "release"
+            shutil.copytree(stage, release)
+            self.assertEqual(stat.S_IMODE(release.stat().st_mode), 0o700)
+            finalize(release)
+            self.assertEqual(stat.S_IMODE(release.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE((release / "orderflow").stat().st_mode), 0o755)
+
     def test_release_manifest_accepts_archive_paths_and_rejects_extra_source(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
         sys.path.insert(0, str(deploy_dir))

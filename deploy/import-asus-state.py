@@ -63,6 +63,13 @@ def verify_manifest(directory: Path, expected: str) -> None:
                    stderr=subprocess.DEVNULL)
 
 
+def make_release_traversable(release: Path) -> None:
+    run("chmod", "-R", "go-w", str(release))
+    # copytree preserves the private 0700 staging root. The service account
+    # needs execute permission on this one directory to reach the code.
+    release.chmod(0o755)
+
+
 def private_copy(source: Path, dest: Path, expected: str) -> None:
     require(source.is_file() and not source.is_symlink(), "transfer file missing or symlinked")
     shutil.copyfile(source, dest)
@@ -173,7 +180,9 @@ def main() -> None:
         Path("/opt/orderflow/releases").mkdir(parents=True, exist_ok=True)
         shutil.copytree(stage, release, symlinks=True)
         run("chown", "-R", "root:root", str(release))
-        run("chmod", "-R", "go-w", str(release))
+        make_release_traversable(release)
+        run("runuser", "-u", "orderflow", "--", "test", "-x", str(release / ".venv/bin/python"))
+        run("runuser", "-u", "orderflow", "--", "test", "-r", str(release / "orderflow/app.py"))
         verify_manifest(release, manifest_sha)
         current.symlink_to(Path("releases") / commit)
         state.mkdir(mode=0o700)
