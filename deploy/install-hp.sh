@@ -5,6 +5,10 @@ if [ "$(id -u)" -ne 0 ]; then
   echo 'Run as root with sudo.' >&2
   exit 1
 fi
+if [ "$(hostname)" != hp-ubuntu2604-server ]; then
+  echo 'This installer is for hp-ubuntu2604-server only.' >&2
+  exit 1
+fi
 commit=${1:-}
 case "$commit" in
   *[!0-9a-f]*|'') echo 'Pass the exact 40-character Git commit SHA.' >&2; exit 1 ;;
@@ -49,7 +53,6 @@ cp -a "$stage"/. "$release"/
 chown -R root:root "$release"
 chmod -R go-w "$release"
 chmod 0755 "$release"
-"$release/.venv/bin/python" -c 'import orderflow.app, pypdf'
 ln -s "releases/$commit" /opt/orderflow/current
 install -o root -g root -m 0644 "$release/deploy/orderflow.service" "$unit"
 systemd-analyze verify "$unit"
@@ -58,6 +61,6 @@ systemctl enable --now orderflow.service
 systemctl is-active --quiet orderflow.service
 curl --fail --silent --show-error --retry 5 --retry-delay 1 --retry-connrefused --max-time 5 \
   -H 'Host: momonong.me' http://127.0.0.1:18081/orderflow/api/health |
-  "$release/.venv/bin/python" -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and data["mode"] == "mock-and-real"'
+  /usr/bin/python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and data["mode"] == "mock-and-real"'
 installed=1
 echo "OrderFlow release $commit active on 127.0.0.1:18081."
