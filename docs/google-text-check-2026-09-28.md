@@ -9,3 +9,11 @@
 程式修正與驗證不等於正式部署。ASUS live release 仍需以 `/opt/orderflow/current` 查證。`deploy/upgrade-asus-release.py` 是針對此修正的最小 root gate：只接受固定舊 release 與 SHA 釘選的新來源 tar；依賴與 unit 必須不變，以既有 venv 在新 release 執行測試，檢查無 queued/running 工作，停止 app 後備份 SQLite/PDF，原子切換 symlink 並驗匿名登入頁/受保護 API；失敗嘗試恢復舊 release。它不重匯資料或改 HP 路由。service 重啟會清除記憶體中的使用者 AI key；使用者需在新頁自行重新輸入，不向維護者提供金鑰。正式部署、真實 Google 呼叫和人工驗收分開記錄。
 
 同日另有使用者截圖顯示頁首下方空白。真瀏覽器讀取正式頁面時，初始也短暫只顯頁首，稍後正常出現登入表單；無 console error。已證實的顯示缺陷是 HTML 初始把登入區與工作區都隱藏，而 `initialize()` 遇到 bootstrap 非 JSON、非 401、網路錯誤或逾時時，只更新仍隱藏的工作區，因此畫面可能持續只剩頁首。這說明一條可重現的空白路徑，**不證明使用者當次是哪個 bootstrap 錯誤**。修正讓初始載入說明直接可見；失敗時顯安全訊息與重新檢查按鈕，JS 資源缺失時仍有靜態說明；401 登入、已授權工作區及 API 權限保持分離。本機真瀏覽器以合成 bootstrap 延遲、HTML 502、登入過期、成功與 JS 404 驗證畫面，未動正式服務或使用者資料。
+
+## 2026-09-29 ASUS 升級預備階段失敗
+
+首次 code-only 升級只輸出 `CalledProcessError`，且在停止服務前的 staging 階段結束；`current` 仍指向 `a6e619f`，ASUS app 未重啟，正式 SQLite/PDF 未變動。舊腳本丟棄子程序輸出，也未記錄失敗 phase，因此無法從該次記錄精確指定是哪個命令失敗。
+
+在 ASUS 以操作員帳號、原候選版來源 tar、同一 Python 3.14 `tarfile.extractall(filter="data")` 與 `umask 077` 重現：來源中的 `orderflow/` 與 `tests/` 子目錄實際變成 `0700`，普通使用者無法進入；原腳本只移除 group/other 寫入權，並只把 staging 根目錄改成 `0755`。這足以使後續以 `orderflow` 服務帳號執行的原始碼可讀性檢查失敗，與已觀察的停機前失敗相符；因原 gate 缺少 phase，仍屬高度可信根因推論。候選 tar 共 34 個條目，複製的 venv 共 91 個一般檔案，未發現 DB/PDF/key/state 類項目；正式 `/var/lib/orderflow` 仍為 `0700`。
+
+修正對僅含 git archive 與既有 venv 的 release staging 執行 `chmod -R a+rX,go-w`，讓程式子目錄可走訪、原始碼可讀，維持他人不可寫；服務資料目錄不在此樹中。升級腳本的子程序失敗改為固定 phase 與退出碼，不回傳命令輸出、原始錯誤本文或敏感資料。合成 tar/umask 回歸測試與 Python/Node 測試通過。此修正尚需在最終候選版上完成 ASUS root preflight 與正式部署驗證；現有資料備份、切換及回復路徑仍未由這次失敗執行到。

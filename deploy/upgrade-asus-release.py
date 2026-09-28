@@ -36,8 +36,16 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def run(*command: str) -> None:
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def run(*command: str, phase: str, cwd: Path | None = None) -> None:
+    result = subprocess.run(command, cwd=cwd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    require(result.returncode == 0, f"phase={phase} exit={result.returncode}")
+
+
+def make_release_readable(stage: Path) -> None:
+    # tarfile's data filter may yield 0700 directories under umask 077.
+    # This tree contains only the reviewed git archive and copied venv.
+    run("chmod", "-R", "a+rX,go-w", str(stage), phase="stage-permissions")
 
 
 def digest(path: Path) -> str:
@@ -132,15 +140,17 @@ def main() -> None:
                 require(digest(stage / name) == digest(old / name),
                         f"{name} changed; code-only upgrade gate cannot continue")
             shutil.copytree(old / ".venv", stage / ".venv", symlinks=True)
-            run("chown", "-R", "root:root", str(stage))
-            run("chmod", "-R", "go-w", str(stage))
+            run("chown", "-R", "root:root", str(stage), phase="stage-chown")
+            make_release_readable(stage)
             stage.chmod(0o755)
             os.replace(stage, staged_release)
-        run("runuser", "-u", "orderflow", "--", "test", "-x", str(staged_release / ".venv/bin/python"))
-        run("runuser", "-u", "orderflow", "--", "test", "-r", str(staged_release / "orderflow/gemini.py"))
-        subprocess.run(["runuser", "-u", "orderflow", "--", "env", "PYTHONDONTWRITEBYTECODE=1",
-                        str(staged_release / ".venv/bin/python"), "-m", "unittest", "discover", "-s", "tests", "-q"],
-                       cwd=staged_release, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run("runuser", "-u", "orderflow", "--", "test", "-x", str(staged_release / ".venv/bin/python"),
+            phase="stage-python-access")
+        run("runuser", "-u", "orderflow", "--", "test", "-r", str(staged_release / "orderflow/gemini.py"),
+            phase="stage-code-access")
+        run("runuser", "-u", "orderflow", "--", "env", "PYTHONDONTWRITEBYTECODE=1",
+            str(staged_release / ".venv/bin/python"), "-m", "unittest", "discover", "-s", "tests", "-q",
+            cwd=staged_release, phase="stage-unit-tests")
         os.replace(staged_release, RELEASES / args.commit)
     finally:
         if staged_release.exists():
@@ -153,7 +163,7 @@ def main() -> None:
     try:
         require(pending_jobs() == 0, "queued/running work appeared; upgrade stopped")
         stopped = True
-        run("systemctl", "stop", "orderflow")
+        run("systemctl", "stop", "orderflow", phase="stop-service")
         require(pending_jobs() == 0, "queued/running work after stop; old app must be reviewed")
         require(not backup.exists(), "backup destination already exists")
         backup.mkdir(parents=True, mode=0o700)
@@ -180,7 +190,7 @@ def main() -> None:
             snapshot.close()
         replace_current(args.commit)
         switched = True
-        run("systemctl", "start", "orderflow")
+        run("systemctl", "start", "orderflow", phase="start-service")
         wait_app()
         require(subprocess.run(["systemctl", "is-active", "--quiet", "orderflow"]).returncode == 0,
                 "ASUS app not active after upgrade")
@@ -191,10 +201,10 @@ def main() -> None:
         recovered = not stopped
         if stopped:
             try:
-                run("systemctl", "stop", "orderflow")
+                run("systemctl", "stop", "orderflow", phase="rollback-stop-service")
                 if switched:
                     replace_current(OLD_COMMIT)
-                run("systemctl", "start", "orderflow")
+                run("systemctl", "start", "orderflow", phase="rollback-start-service")
                 wait_app()
                 recovered = True
                 print("Upgrade failed; previous release restarted; state and backup retained", file=sys.stderr)
