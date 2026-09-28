@@ -12,6 +12,7 @@ import pwd
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -104,10 +105,11 @@ def wait_app() -> None:
 
 def main() -> None:
     require(os.geteuid() == 0 and socket.gethostname() == "asus-ubuntu2604-server", "wrong host or user")
-    require(len(sys.argv) == 5, "pass exact app commit, manifest, HP state tar and SQLite digests")
-    commit, manifest_sha, expected_state_sha, expected_sqlite_sha = sys.argv[1:]
+    require(len(sys.argv) == 7, "pass app commit, manifest, HP tar/SQLite/ciphertext and ASUS public key digests")
+    commit, manifest_sha, expected_state_sha, expected_sqlite_sha, expected_cipher_sha, expected_public_sha = sys.argv[1:]
     require(COMMIT.fullmatch(commit) is not None and all(
-            SHA.fullmatch(value) is not None for value in (manifest_sha, expected_state_sha, expected_sqlite_sha)),
+            SHA.fullmatch(value) is not None for value in
+            (manifest_sha, expected_state_sha, expected_sqlite_sha, expected_cipher_sha, expected_public_sha)),
             "invalid commit or digest")
     stage = Path("/home/morris/orderflow-staging") / commit
     transfer = Path("/home/morris/orderflow-migration/import")
@@ -116,6 +118,11 @@ def main() -> None:
     unit = Path("/etc/systemd/system/orderflow.service")
     state = Path("/var/lib/orderflow")
     credential = Path("/etc/orderflow/login-auth.caddy")
+    private_key = Path("/etc/orderflow/migration-private.pem")
+    require(private_key.is_file() and not private_key.is_symlink() and
+            private_key.stat().st_uid == 0 and private_key.stat().st_gid == 0 and
+            stat.S_IMODE(private_key.stat().st_mode) == 0o600,
+            "ASUS root-only migration private key missing or permissions changed")
     require(not release.exists() and not current.exists() and not current.is_symlink()
             and not unit.exists() and not state.exists() and not credential.exists(),
             "ASUS OrderFlow target already exists")
@@ -128,18 +135,27 @@ def main() -> None:
     metadata_path = transfer / "meta.json"
     require(metadata_path.is_file() and not metadata_path.is_symlink(), "transfer metadata missing")
     metadata = json.loads(metadata_path.read_text())
-    state_sha, sqlite_sha, auth_sha = (metadata[key] for key in
-                                      ("state_sha256", "sqlite_sha256", "auth_sha256"))
+    state_sha, sqlite_sha, cipher_sha, public_sha = (metadata[key] for key in
+        ("state_sha256", "sqlite_sha256", "credential_ciphertext_sha256", "recipient_public_key_sha256"))
     stable_sha = metadata["snapshot"]["stable_digest"]
-    require(state_sha == expected_state_sha and sqlite_sha == expected_sqlite_sha,
-            "ASUS transfer differs from independently reviewed HP export")
-    require(all(SHA.fullmatch(item) for item in (state_sha, sqlite_sha, auth_sha, stable_sha)),
+    require((state_sha, sqlite_sha, cipher_sha, public_sha) ==
+            (expected_state_sha, expected_sqlite_sha, expected_cipher_sha, expected_public_sha),
+            "ASUS transfer differs from independently reviewed HP export and key")
+    require(all(SHA.fullmatch(item) for item in (state_sha, sqlite_sha, cipher_sha, public_sha, stable_sha)),
             "invalid transfer digest")
     private = Path(tempfile.mkdtemp(prefix="orderflow-import-", dir="/tmp"))
     service_transition_attempted = False
     try:
         private_copy(transfer / "state.tar", private / "state.tar", state_sha)
-        private_copy(transfer / "login-auth.caddy", private / "login-auth.caddy", auth_sha)
+        private_copy(transfer / "login-auth.oaep", private / "login-auth.oaep", cipher_sha)
+        run("openssl", "pkey", "-in", str(private_key), "-pubout", "-out", str(private / "derived-public.pem"))
+        require(digest(private / "derived-public.pem") == expected_public_sha,
+                "ASUS private key does not match pinned public key")
+        run("openssl", "pkeyutl", "-decrypt", "-inkey", str(private_key),
+            "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha256",
+            "-pkeyopt", "rsa_mgf1_md:sha256", "-in", str(private / "login-auth.oaep"),
+            "-out", str(private / "login-auth.caddy"))
+        (private / "login-auth.caddy").chmod(0o600)
         lines = [line.strip() for line in (private / "login-auth.caddy").read_bytes().splitlines() if line.strip()]
         require(len(lines) == 3 and lines[0] == b"basic_auth {" and
                 lines[1].startswith(b"orderflow $2") and lines[2] == b"}",
@@ -167,7 +183,7 @@ def main() -> None:
         credential.parent.mkdir(mode=0o700, exist_ok=True)
         shutil.copyfile(private / "login-auth.caddy", credential)
         credential.chmod(0o600)
-        (transfer / "login-auth.caddy").unlink()
+        (transfer / "login-auth.oaep").unlink()
         shutil.copyfile(release / "deploy/orderflow-asus.service", unit)
         unit.chmod(0o644)
         run("systemd-analyze", "verify", str(unit))

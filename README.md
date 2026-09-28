@@ -24,7 +24,7 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 ## 公開測試與 ASUS 遷移邊界
 
-公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；OrderFlow 應用和持久資料遷至 ASUS。ASUS 應用僅監聽 `127.0.0.1:18081`，HP Caddy 僅連本機 `127.0.0.1:18082`；兩台主機之間以釘選 ASUS 主機金鑰、限來源與目的埠的 SSH local forward 加密轉送。舊 HP 應用先停止並停用，再從一致的 SQLite 備份與 PDF 檔案匯入 ASUS；兩台不可同時寫入。正式切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。本 repo 的 `deploy/export-hp-for-asus.py`、`deploy/import-asus-state.py`、`deploy/migration_checks.py` 與 `deploy/orderflow-asus.service` 是經審查後供該流程使用的候選檔。正式主機狀態須以部署後紀錄確認；候選檔與測試不等於已部署。
+公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；OrderFlow 應用和持久資料遷至 ASUS。ASUS 應用僅監聽 `127.0.0.1:18081`，HP Caddy 僅連本機 `127.0.0.1:18082`；兩台主機之間以釘選 ASUS 主機金鑰、限來源與目的埠的 SSH local forward 加密轉送。舊 HP 應用先停止並停用，再從一致的 SQLite 備份與 PDF 檔案匯入 ASUS；兩台不可同時寫入。正式切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。本 repo 的 `deploy/provision-asus-migration-key.py`、`deploy/export-hp-for-asus.py`、`deploy/import-asus-state.py`、`deploy/migration_checks.py` 與 `deploy/orderflow-asus.service` 是經審查後供該流程使用的候選檔。ASUS 先建立 root-only 私鑰，HP 釘選其公鑰 SHA，將 bcrypt 驗證檔以 RSA-OAEP(SHA-256)加密；操作員可讀暫存只含密文，ASUS root 解密後將正式憑證保存為 0600。正式主機狀態須以部署後紀錄確認；候選檔與測試不等於已部署。
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。HP 舊 Caddy Basic Auth 在 ASUS 資料與功能驗證前維持啟用；切換後由應用表單登入保護。
 

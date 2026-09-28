@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import pwd
 import shutil
@@ -104,6 +105,11 @@ def sha256_file(path: Path) -> str:
 
 def main() -> None:
     require(os.geteuid() == 0 and socket.gethostname() == "hp-ubuntu2604-server", "wrong host or user")
+    require(len(sys.argv) == 3 and re.fullmatch(r"[0-9a-f]{64}", sys.argv[2]) is not None,
+            "pass ASUS public key path and independently checked SHA-256")
+    public_key = Path(sys.argv[1])
+    require(public_key.is_file() and not public_key.is_symlink() and
+            sha256_file(public_key) == sys.argv[2], "ASUS recipient public key changed")
     require(Path("/opt/orderflow/current").readlink() == Path("releases") / OLD_RELEASE,
             "HP release changed")
     require(sha256_file(Path("/etc/caddy/Caddyfile")) == OLD_CADDY, "HP Caddyfile changed")
@@ -116,15 +122,26 @@ def main() -> None:
             "HP credential format changed")
     credential = Path("/etc/caddy/secrets/orderflow-auth.caddy")
     require(credential.is_file() and not credential.is_symlink(), "HP bcrypt credential missing")
+    require(credential.stat().st_size <= 318, "credential exceeds RSA-3072 OAEP-SHA256 capacity")
     token, document_id, job_id = synthetic_probe(password)
     backup_parent = Path("/var/backups/orderflow")
     backup_parent.mkdir(mode=0o700, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix="asus-migration-", dir=backup_parent))
+    root_public = backup / "recipient-public.pem"
+    shutil.copyfile(public_key, root_public)
+    root_public.chmod(0o600)
+    require(sha256_file(root_public) == sys.argv[2], "ASUS public key changed during root copy")
     transfer_parent = Path("/home/morris/orderflow-migration")
     transfer_parent.mkdir(mode=0o700, exist_ok=True)
     transfer = Path(tempfile.mkdtemp(prefix="export-", dir=transfer_parent))
     rollback_needed = False
     try:
+        # Fail the recipient-key and OAEP checks before stopping the live HP app.
+        root_cipher = backup / "login-auth.oaep"
+        run("openssl", "pkeyutl", "-encrypt", "-pubin", "-inkey", str(root_public),
+            "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha256",
+            "-pkeyopt", "rsa_mgf1_md:sha256", "-in", str(credential), "-out", str(root_cipher))
+        root_cipher.chmod(0o600)
         rollback_needed = True
         run("systemctl", "disable", "--now", "orderflow.service")
         with socket.socket() as probe:
@@ -149,7 +166,7 @@ def main() -> None:
         require((snapshot / "files" / f"{document_id}.pdf").is_file(), "synthetic PDF absent from snapshot")
         with tarfile.open(transfer / "state.tar", "w") as archive:
             archive.add(snapshot, arcname=".")
-        shutil.copyfile(credential, transfer / "login-auth.caddy")
+        shutil.copyfile(root_cipher, transfer / "login-auth.oaep")
         token_path = backup / "continuity-token"
         token_path.write_text(token)
         token_path.chmod(0o600)
@@ -157,15 +174,16 @@ def main() -> None:
                    "snapshot": summary, "transfer_path": str(transfer),
                    "state_sha256": sha256_file(transfer / "state.tar"),
                    "sqlite_sha256": sha256_file(snapshot / "orderflow.sqlite3"),
-                   "auth_sha256": sha256_file(transfer / "login-auth.caddy")}
+                   "credential_ciphertext_sha256": sha256_file(transfer / "login-auth.oaep"),
+                   "recipient_public_key_sha256": sys.argv[2]}
         receipt_path = backup / "receipt.json"
         receipt_path.write_text(json.dumps(receipt, sort_keys=True))
         receipt_path.chmod(0o600)
-        public_meta = {key: receipt[key] for key in ("snapshot", "state_sha256", "sqlite_sha256", "auth_sha256")}
+        public_meta = {key: receipt[key] for key in ("snapshot", "state_sha256", "sqlite_sha256", "credential_ciphertext_sha256", "recipient_public_key_sha256")}
         (transfer / "meta.json").write_text(json.dumps(public_meta, sort_keys=True))
         morris = pwd.getpwnam("morris")
         for path in (transfer_parent, transfer, transfer / "state.tar",
-                     transfer / "login-auth.caddy", transfer / "meta.json"):
+                     transfer / "login-auth.oaep", transfer / "meta.json"):
             os.chown(path, morris.pw_uid, morris.pw_gid)
             os.chmod(path, 0o700 if path.is_dir() else 0o600)
         print("HP OrderFlow stopped and disabled; consistent SQLite backup and PDF check: PASS")
@@ -174,6 +192,7 @@ def main() -> None:
         print(f"Rows: sessions={summary['sessions']} documents={summary['documents']} jobs={summary['jobs']} pending_at_stop={summary['pending_jobs']}")
         print(f"HP state tar SHA-256: {receipt['state_sha256']}")
         print(f"HP SQLite backup SHA-256: {receipt['sqlite_sha256']}")
+        print(f"Credential ciphertext SHA-256: {receipt['credential_ciphertext_sha256']}")
     except Exception:
         if rollback_needed:
             try:
