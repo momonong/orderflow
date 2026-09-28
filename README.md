@@ -11,7 +11,7 @@ uv sync --locked
 uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --auth-file /path/to/local-caddy-auth.caddy
 ```
 
-`--auth-file` 需為含單一 `orderflow` 帳號與 bcrypt hash 的 Caddy `basic_auth` 區塊；缺少或格式錯誤會拒絕啟動。正式服務從 systemd `LoadCredential` 讀取同一 hash，不讀明文密碼檔。瀏覽 `http://127.0.0.1:8765/orderflow/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
+`--auth-file` 需為含單一 `orderflow` 帳號與 bcrypt hash 的 Caddy `basic_auth` 區塊；缺少或格式錯誤會拒絕啟動。正式服務從 systemd `LoadCredential` 讀取同一 hash，不讀明文密碼檔；ASUS 候選 unit 為 `deploy/orderflow-asus.service`。瀏覽 `http://127.0.0.1:8765/orderflow/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
 
 ## 使用方式
 
@@ -22,11 +22,13 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 金鑰只保存在單一服務程序的記憶體，設定 15 分鐘後失效；清除或程序重啟後需重新輸入。已開始的 Google 請求不能撤回；結果不明時不自動重送。session cookie 為隨機秘密，資料庫只保存其雜湊；金鑰不寫入資料庫、cookie、報告或日誌。網站登入有效期 8 小時；登出會換成無權限 cookie，重新登入同一瀏覽器可取回該 session 的文件與工作。清除 cookie 或更換瀏覽器不保證取回。這是單一共用測試帳號，不是正式多使用者授權。
 
-## 公開測試邊界
+## 公開測試與 ASUS 遷移邊界
 
-正式公開入口的路由、認證與操作由 `selfhost-servers` 專案管理。此服務仍只綁 loopback；使用 `--public-origin https://momonong.me` 時，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 增加 `Secure`。切換後，入口保留 `/orderflow` 前綴與 HTTPS，應用對所有 API 資料與操作驗證 session；匿名只可讀登入頁與靜態資源。應用認證通過正式驗證前，HP 的 Caddy Basic Auth 維持啟用。應用不信任任意客戶端提供的代理標頭，也不從前端接受任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。
+公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；OrderFlow 應用和持久資料遷至 ASUS。ASUS 應用僅監聽 `127.0.0.1:18081`，HP Caddy 僅連本機 `127.0.0.1:18082`；兩台主機之間以釘選 ASUS 主機金鑰、限來源與目的埠的 SSH local forward 加密轉送。舊 HP 應用先停止並停用，再從一致的 SQLite 備份與 PDF 檔案匯入 ASUS；兩台不可同時寫入。正式切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。本 repo 的 `deploy/export-hp-for-asus.py`、`deploy/import-asus-state.py`、`deploy/migration_checks.py` 與 `deploy/orderflow-asus.service` 是經審查後供該流程使用的候選檔。正式主機狀態須以部署後紀錄確認；候選檔與測試不等於已部署。
 
-公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。應用 service unit 候選檔見 `deploy/orderflow.service`：以 systemd `DynamicUser` 專屬身份執行、`StateDirectory` 保存 0700 資料，程式碼在 root 擁有的 `/opt/orderflow/current` 唯讀使用，服務禁止讀取一般使用者家目錄。實際入口與 systemd 狀態依部署後驗證紀錄判定。HP 現有 v0.2 服務只可用 `deploy/upgrade-hp.sh <commit>` 升級；`deploy/install-hp.sh` 是首次安裝的歷史腳本，不可在現有主機重跑。升級腳本要求逐檔雜湊驗證過的 staging release、既有 Caddy Basic Auth、既有 credential；停止服務後備份原 unit 與整個資料目錄，再切換 symlink/unit。失敗會復原舊 app 與 unit，不刪新資料；備份保留。`sessions` 三欄維持舊版格式，新的認證狀態獨立於 `session_auth`，供舊版 app 回退使用。Caddy 切換與回退依 selfhost-servers 的 OrderFlow 部署文件操作；如需回退舊 app，先恢復 Caddy Basic Auth。
+在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。HP 舊 Caddy Basic Auth 在 ASUS 資料與功能驗證前維持啟用；切換後由應用表單登入保護。
+
+公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存，**尚未建立保留期限、備份或自動清理政策**；服務負責者需核對磁碟與資料目錄。ASUS unit 使用靜態 `orderflow` 系統帳號及 0700 `StateDirectory`；程式碼由 root 持有，登入 bcrypt hash 透過 systemd credential 唯讀交給應用。HP v0.2 的首次安裝檔 `deploy/install-hp.sh` 與 unit `deploy/orderflow.service` 僅保留歷史與緊急分析用途，不可拿它們重跑 ASUS 遷移或直接回復到過時的 HP 資料。
 
 ## 驗證
 
