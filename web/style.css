@@ -1,0 +1,25 @@
+:root { color-scheme: light; font-family: system-ui, "Noto Sans TC", sans-serif; background: #f5f7fa; color: #182333; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
+header { padding: 24px 28px; border-radius: 14px; background: #173b55; color: white; }
+header p { max-width: 70ch; line-height: 1.6; }
+h1 { margin: 8px 0; font-size: clamp(1.8rem, 4vw, 2.6rem); }
+h2 { margin-top: 0; }
+.eyebrow { font-weight: 700; letter-spacing: .04em; color: #b5e4df; }
+section { margin-top: 18px; padding: 22px 26px; background: white; border: 1px solid #dce4ea; border-radius: 12px; box-shadow: 0 2px 6px #112a3a0a; }
+section p { line-height: 1.55; }
+button, select, input { font: inherit; }
+button { border: 0; border-radius: 7px; padding: 9px 14px; margin: 4px 6px 4px 0; background: #15688a; color: white; cursor: pointer; }
+button:hover:not(:disabled) { background: #0b4c69; }
+button:disabled { background: #9aabb5; cursor: not-allowed; }
+input[type=file] { display: block; max-width: 100%; padding: 12px 0; }
+select { padding: 8px; margin: 4px 8px; border: 1px solid #a8bbc6; border-radius: 6px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #dde6ec; }
+th { background: #eaf1f5; }
+textarea { display: block; width: 100%; margin-top: 12px; padding: 12px; font: 13px/1.5 ui-monospace, monospace; border: 1px solid #a8bbc6; border-radius: 6px; background: #f9fbfc; }
+.document { display: block; width: 100%; text-align: left; background: #e7f0f4; color: #143a50; }
+.document:hover:not(:disabled) { background: #d3e7ed; }
+footer { margin-top: 25px; color: #526576; }
