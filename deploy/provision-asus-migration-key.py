@@ -34,6 +34,7 @@ def main() -> None:
     directory.chmod(0o700)
     public.parent.mkdir(mode=0o700, exist_ok=True)
     public.parent.chmod(0o700)
+    owner = pwd.getpwnam("morris")
     with tempfile.TemporaryDirectory(prefix="key-check-", dir=directory) as temp:
         work = Path(temp)
         secret = work / "private.pem"
@@ -53,13 +54,22 @@ def main() -> None:
             "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha256",
             "-pkeyopt", "rsa_mgf1_md:sha256", "-in", str(cipher), "-out", str(plain))
         require(plain.read_bytes() == probe.read_bytes(), "RSA-OAEP self-test failed")
-        os.replace(secret, private)
-        private.chmod(0o600)
-        shutil.copyfile(candidate, public)
-        owner = pwd.getpwnam("morris")
-        os.chown(public.parent, owner.pw_uid, owner.pw_gid)
-        os.chown(public, owner.pw_uid, owner.pw_gid)
-        public.chmod(0o644)
+        published_private = False
+        try:
+            os.replace(secret, private)
+            published_private = True
+            private.chmod(0o600)
+            shutil.copyfile(candidate, public)
+            os.chown(public.parent, owner.pw_uid, owner.pw_gid)
+            os.chown(public, owner.pw_uid, owner.pw_gid)
+            public.chmod(0o644)
+        except Exception:
+            # Neither key has been announced or transferred yet. Remove only
+            # artifacts created in this attempt so gate 0 can be retried.
+            public.unlink(missing_ok=True)
+            if published_private:
+                private.unlink(missing_ok=True)
+            raise
     print("ASUS root-only migration private key and synthetic OAEP self-test: PASS")
     print(f"Public key SHA-256: {hashlib.sha256(public.read_bytes()).hexdigest()}")
     print(f"Public key: {public}")
