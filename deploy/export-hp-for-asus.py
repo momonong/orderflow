@@ -123,6 +123,7 @@ def main() -> None:
     credential = Path("/etc/caddy/secrets/orderflow-auth.caddy")
     require(credential.is_file() and not credential.is_symlink(), "HP bcrypt credential missing")
     require(credential.stat().st_size <= 318, "credential exceeds RSA-3072 OAEP-SHA256 capacity")
+    auth_digest = sha256_file(credential)
     token, document_id, job_id = synthetic_probe(password)
     backup_parent = Path("/var/backups/orderflow")
     backup_parent.mkdir(mode=0o700, exist_ok=True)
@@ -131,6 +132,10 @@ def main() -> None:
     shutil.copyfile(public_key, root_public)
     root_public.chmod(0o600)
     require(sha256_file(root_public) == sys.argv[2], "ASUS public key changed during root copy")
+    root_auth = backup / "login-auth.caddy"
+    shutil.copyfile(credential, root_auth)
+    root_auth.chmod(0o600)
+    require(sha256_file(root_auth) == auth_digest, "HP bcrypt verifier changed after login probe")
     transfer_parent = Path("/home/morris/orderflow-migration")
     transfer_parent.mkdir(mode=0o700, exist_ok=True)
     transfer = Path(tempfile.mkdtemp(prefix="export-", dir=transfer_parent))
@@ -140,8 +145,9 @@ def main() -> None:
         root_cipher = backup / "login-auth.oaep"
         run("openssl", "pkeyutl", "-encrypt", "-pubin", "-inkey", str(root_public),
             "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha256",
-            "-pkeyopt", "rsa_mgf1_md:sha256", "-in", str(credential), "-out", str(root_cipher))
+            "-pkeyopt", "rsa_mgf1_md:sha256", "-in", str(root_auth), "-out", str(root_cipher))
         root_cipher.chmod(0o600)
+        require(sha256_file(credential) == auth_digest, "HP bcrypt verifier changed before stop")
         rollback_needed = True
         run("systemctl", "disable", "--now", "orderflow.service")
         with socket.socket() as probe:
