@@ -5,6 +5,9 @@ set -eu
   echo 'Run as root on hp-ubuntu2604-server.' >&2; exit 1;
 }
 commit=${1:-}
+manifest_sha=${2:-}
+case "$manifest_sha" in *[!0-9a-f]*|'') echo 'Pass reviewed manifest SHA-256.' >&2; exit 1;; esac
+[ "${#manifest_sha}" -eq 64 ] || { echo 'Pass reviewed manifest SHA-256.' >&2; exit 1; }
 case "$commit" in *[!0-9a-f]*|'') echo 'Pass an exact commit SHA.' >&2; exit 1;; esac
 [ "${#commit}" -eq 40 ] || { echo 'Pass an exact commit SHA.' >&2; exit 1; }
 old_commit=09712b6d828259e416d4f857447544fab4b09304
@@ -32,7 +35,7 @@ grep -Fq 'import /etc/caddy/secrets/orderflow-auth.caddy' /etc/caddy/Caddyfile |
 [ ! -e "$release" ] && [ ! -L "$release" ] || {
   echo 'Target release already exists.' >&2; exit 1;
 }
-(cd "$stage" && sha256sum -c release-manifest.sha256 --status)
+(cd "$stage" && printf '%s  release-manifest.sha256\n' "$manifest_sha" | sha256sum -c --status && sha256sum -c release-manifest.sha256 --status)
 systemd-analyze verify "$stage/deploy/orderflow.service"
 install -d -o root -g root -m 0755 "$release"
 cp -a "$stage"/. "$release"/
@@ -40,7 +43,7 @@ chown -R root:root "$release"
 chmod -R go-w "$release"
 chmod 0755 "$release"
 # Recheck the root-owned copy. Do not execute staged or release Python as root.
-(cd "$release" && sha256sum -c release-manifest.sha256 --status)
+(cd "$release" && printf '%s  release-manifest.sha256\n' "$manifest_sha" | sha256sum -c --status && sha256sum -c release-manifest.sha256 --status)
 backup=/var/backups/orderflow/pre-session-$commit
 [ ! -e "$backup" ] || { echo 'Backup destination already exists.' >&2; exit 1; }
 install -d -o root -g root -m 0700 /var/backups/orderflow "$backup" "$backup/data"
