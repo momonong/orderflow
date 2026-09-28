@@ -30,7 +30,7 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 
-公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存；HP 遷移時有一次性 root-only 備份，但**尚未建立 ASUS 持續備份、保留期限或自動清理政策**；服務負責者需核對磁碟與資料目錄。ASUS unit 使用靜態 `orderflow` 系統帳號及 0700 `StateDirectory`；程式碼由 root 持有，登入 bcrypt hash 透過 systemd credential 唯讀交給應用。HP v0.2 的首次安裝檔 `deploy/install-hp.sh` 與 unit `deploy/orderflow.service` 僅保留歷史與緊急分析用途，不可拿它們重跑 ASUS 遷移或直接回復到過時的 HP 資料。
+公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存；HP 遷移時有一次性 root-only 備份，但**尚未建立 ASUS 持續備份、保留期限或自動清理政策**；服務負責者需核對磁碟與資料目錄。ASUS unit 使用靜態 `orderflow` 系統帳號及 0700 `StateDirectory`；程式碼由 root 持有，登入 bcrypt hash 透過 systemd credential 唯讀交給應用。HP v0.2 的首次安裝腳本與 unit 只留在 Git 歷史及主機原始備份中；正式分支不提供重跑入口。不得以過時的 HP 資料直接回復目前 ASUS 服務。
 
 ## 驗證
 
