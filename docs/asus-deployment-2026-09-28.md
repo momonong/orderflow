@@ -18,3 +18,11 @@
 - 公開 HTTPS 唯讀核對：`/orderflow/` 與 `/orderflow/test/` 回 200，HTML、管理與診斷 JS/CSS 的 SHA-256 均與 ASUS release 相同；匿名 `/orderflow/api/bootstrap` 和 `/orderflow/api/management/bootstrap` 回 401 `AUTH_REQUIRED`，沒有 Basic Auth challenge；首頁 `/` 回 200，`/orderflow-other/` 回 404，`/orderflow/test` 回 308 並導向 `/orderflow/test/`。
 - 本機以與 ASUS 靜態資源逐位元相同的程式碼及**合成帳號/金鑰**核對兩頁：金鑰欄位無預設 `value`、初始 `readonly`，與網站密碼欄位名稱分開；貼入網址被本地拒絕，合成金鑰可設定、清除及登出。沒有使用真實金鑰、上傳真實 PDF 或再次呼叫 Google。第三方密碼管理器可能稍後填入欄位，使用者實際 Chrome 尚待驗收；本次不能宣稱完整物流功能或人工接受。
 - ASUS 操作員私有 staging `/home/morris/orderflow-key-input-7d451d9` 與 root 私有 gate 目錄尚未清理；保留候選封存、腳本及備份供交接。ASUS 持續備份與保留政策仍未建立；這次一次性 root 備份不等於持續備份。
+
+## 2026-09-29 原型管理頁部署
+
+- GitHub [PR #7](https://github.com/momonong/orderflow/pull/7) 已合併至 `main`，merge commit `0ab2b1c80cf0c7623bd05ebb7b75a88ff82415a9`；ASUS 使用 PR head release `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a`，兩者 Git tree 同為 `c06de256905cf6388be36c2002339fa556783543`。變更為六頁採購單／發票管理、人工確認記錄、按幣別報表與 CSV；發票不等於實際出貨，差額不等於庫存。
+- 使用者在 ASUS 互動終端執行的一次性 root gate 回報四筆來源／root 副本 SHA-256 `OK`，`ASUS prototype-record upgrade and protected loopback health: PASS`；升級前備份 `/var/backups/orderflow/before-prototype-records-ee41445565a7`，SQLite、PDF、session 保留，程序重啟後記憶體 AI key 清除。非特權帳號無法讀取 root-only 備份內容；資料保留結論來自 gate 回報，不冒充獨立備份還原驗證。
+- 非特權獨立核對：ASUS `/opt/orderflow/current` 指向 `releases/ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a`，app active/enabled、NRestarts=0，僅監聽 `127.0.0.1:18081`；`/var/lib/orderflow` 為 `0700 orderflow:orderflow`。部署檔 `web/index.html`、`web/manage.js`、`web/manage.css` 的 SHA-256 與 Git 來源一致。HP 舊 app inactive/disabled，Tunnel/Caddy/cloudflared active，轉送僅監聽 `127.0.0.1:18082`；HP Caddy 設定 SHA-256 仍為 `fe0e95aa488cfb73a8d801bc332e40e866a65a32454e11f69979293a4b961be8`，未修改共用入口。
+- 公開 HTTPS 唯讀核對：首頁 `/`、管理 `/orderflow/`、診斷 `/orderflow/test/` 均 200；管理頁包含新發票與數量對照區，公開 `manage.js`／`manage.css` 與 release 檔逐位元相同；匿名 `/orderflow/api/management/bootstrap` 回 401 JSON `AUTH_REQUIRED`；未知相鄰路由 404，`/orderflow` 回 308。這只證明匿名路由與靜態內容，沒有登入後正式環境操作、真實 Google 請求、真實客戶 PDF 或使用者人工接受。合成多品項 HTTP→保存→重啟→報表／CSV 與 Chrome 真 CSS 390px 已在候選提交驗證；PR 無 GitHub CI 工作，不能稱 CI 通過。
+- ASUS 操作員 staging `/home/morris/.staging-prototype-ee414455`、root gate 目錄及 root-only 備份保留供交接，尚未清理。若新版已產生 typed 文件／記錄，不可盲退不理解此資料的舊 runtime；應先停寫對帳並按部署腳本的 typed-write 閘門處理。ASUS 持續備份、保留期限與自動清理政策仍未建立。
