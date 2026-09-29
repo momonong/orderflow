@@ -28,4 +28,4 @@
 
 ## 驗證與部署邊界
 
-需驗證六頁實際操作、桌機與 390px 畫面、合成多品項採購單／發票、混幣、缺欄、重複 PDF、CSV、重啟後持久化、session 隔離、付費確認及原診斷頁不退步。真實附件不得入 Git 或自動送 Google。部署前另核對 ASUS 完整備份、migration、回復閘門與服務狀態。候選 `deploy/upgrade-asus-prototype-records.py` 釘選現行 `7d451d9` runtime、比對原資料、並在首次 typed 寫入後阻止盲退舊 runtime；只完成合成檢查，尚未在 ASUS 執行。本文件與程式分支不代表已部署。
+需驗證六頁實際操作、桌機與 390px 畫面、合成多品項採購單／發票、混幣、缺欄、重複 PDF、CSV、重啟後持久化、session 隔離、付費確認及原診斷頁不退步。真實附件不得入 Git 或自動送 Google。部署前另核對 ASUS 完整備份、migration、回復閘門與服務狀態。`deploy/upgrade-asus-prototype-records.py` 釘選升級前 `7d451d9` runtime、比對原資料、並在首次 typed 寫入後阻止盲退舊 runtime；合成檢查已完成；2026-09-29 使用者回報 ASUS root gate `PASS`、runtime `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a`，非特權核對與尚未人工驗收的範圍見 [ASUS 部署紀錄](asus-deployment-2026-09-28.md)。

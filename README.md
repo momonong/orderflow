@@ -1,6 +1,6 @@
 # OrderFlow 物流管理草稿與診斷測試
 
-本版管理首頁依使用者單檔原型提供儀表板、採購單與發票 PDF 上傳、人工確認的訂單／發票紀錄、發票金額統計、訂購與開票數量對照及 CSV 匯出。Google 辨識仍由網站後端執行，必須明確確認付費請求；已確認資料保存在 SQLite，原 PDF 與 AI 工作結果保留。發票不等於實際出貨，數量差不等於待出貨或實體庫存。這是尚未部署的新階段；目前 ASUS 上線版本仍見下方部署紀錄。新契約見 [原型繼承與採購單／發票管理](docs/prototype-management-phase2.md)，既有未分類品項草稿與診斷流程見 [管理介面第一增量](docs/management-shell-phase1.md)。
+本版管理首頁依使用者單檔原型提供儀表板、採購單與發票 PDF 上傳、人工確認的訂單／發票紀錄、發票金額統計、訂購與開票數量對照及 CSV 匯出。Google 辨識仍由網站後端執行，必須明確確認付費請求；已確認資料保存在 SQLite，原 PDF 與 AI 工作結果保留。發票不等於實際出貨，數量差不等於待出貨或實體庫存。這一階段已於 2026-09-29 部署於 ASUS；正式站的唯讀驗證與尚待人工驗收的範圍見下方部署紀錄。新契約見 [原型繼承與採購單／發票管理](docs/prototype-management-phase2.md)，既有未分類品項草稿與診斷流程見 [管理介面第一增量](docs/management-shell-phase1.md)。
 
 ## 本機啟動
 
@@ -27,6 +27,8 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 2026-09-28 已將應用及唯一可寫的 SQLite/PDF 資料遷至 ASUS，公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；HP 舊 `orderflow.service` 已停用，原始資料及停寫備份保留。ASUS app 僅監聽 `127.0.0.1:18081`，HP Caddy 經本機 `127.0.0.1:18082` 的釘選 SSH local forward 連到 ASUS；網站入口改用應用表單登入。主機與資料驗證詳見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)；切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。
 
 2026-09-29 金鑰欄位修正已部署：ASUS runtime release 為 `7d451d9ec857dbd6f8174adad30cba1d088a9110`；GitHub `main` 合併提交為 `86588dcfc644bbda636a35895e411858632727f2`，兩者程式樹相同。root gate 回報備份與資料保留通過；獨立唯讀核對的服務及公開路由結果見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
+
+2026-09-29 原型管理頁已部署：GitHub [PR #7](https://github.com/momonong/orderflow/pull/7) 合併提交 `0ab2b1c80cf0c7623bd05ebb7b75a88ff82415a9`，ASUS runtime 為 `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a`，兩者 Git tree 相同。使用者執行的一次性 root gate 回報 SQLite/PDF/session 保留與升級前備份 `/var/backups/orderflow/before-prototype-records-ee41445565a7`；非特權唯讀核對的服務、公開路由與限制見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)。此備份不是持續備份；真實 Google 辨識與使用者工作流程仍待驗收。
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 
