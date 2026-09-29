@@ -9,7 +9,7 @@ import unittest
 import uuid
 
 from orderflow.app import Store
-from orderflow.records import validate_rows
+from orderflow.records import RecordRowsError, canonical_record_date, validate_rows
 
 
 def row(kind, **changes):
@@ -120,6 +120,55 @@ class RecordStoreTests(unittest.TestCase):
                          [{"product": "suggestion"}])
         self.assertIsNone(reopened.record_set(self.other, purchase["id"]))
         self.assertEqual(reopened.record_sets(self.other), [])
+
+    def test_date_normalization_and_bounded_field_errors(self):
+        for raw, expected in (("2026/09/22", "2026-09-22"), ("2026/9/2", "2026-09-02"),
+                              ("2024/2/29", "2024-02-29"), ("2026-09-22", "2026-09-22")):
+            with self.subTest(raw=raw):
+                self.assertEqual(canonical_record_date(raw), expected)
+                for kind in ("purchase_order", "invoice"):
+                    self.assertEqual(validate_rows([row(kind, date=raw)], kind)[0]["date"], expected)
+        self.assertIsNone(validate_rows([row("invoice", date=None)], "invoice")[0]["date"])
+        for raw, code in (("09/10/2026", "DATE_FORMAT"), ("2026-9-22", "DATE_FORMAT"),
+                          ("2026/2/29", "DATE_INVALID"), ("2026/02/30", "DATE_INVALID"),
+                          ("2024/13/1", "DATE_INVALID"), ("0000/1/1", "DATE_INVALID")):
+            with self.subTest(raw=raw), self.assertRaises(RecordRowsError) as caught:
+                validate_rows([row("invoice", date=raw)], "invoice")
+            self.assertEqual(caught.exception.errors[0]["field"], "date")
+            self.assertEqual(caught.exception.errors[0]["code"], code)
+        bad = [row("purchase_order", date="2026/2/30", qty="0", currency="usd",
+                   product=None, code=None) for _ in range(6)]
+        with self.assertRaises(RecordRowsError) as caught:
+            validate_rows(bad, "purchase_order")
+        self.assertEqual(str(caught.exception), "RECORD_ROWS_INVALID")
+        self.assertEqual(len(caught.exception.errors), 20)
+        self.assertEqual({issue["field"] for issue in caught.exception.errors[:4]},
+                         {"date", "qty", "currency", "product"})
+        self.assertEqual(caught.exception.errors[0]["index"], 1)
+        self.assertEqual(caught.exception.errors[0]["row_id"], bad[0]["id"])
+        self.assertNotIn("2026/2/30", str(caught.exception.errors))
+        with self.assertRaises(RecordRowsError) as malformed:
+            validate_rows([row("purchase_order", status=[])], "purchase_order")
+        self.assertEqual(malformed.exception.errors[0]["code"], "STATUS_INVALID")
+
+    def test_slash_date_save_restart_preserves_ai_source(self):
+        document, job = self.source("invoice", b"synthetic-invoice")
+        self.store.set_job(job["id"], result=[{"product": "suggestion", "date": "2026/9/22"}])
+        original_result = self.store.job(self.owner, job["id"], "management")["result"]
+        original = row("invoice", date="2026/9/22")
+        saved, _ = self.store.save_record_set(self.owner, document["id"], job["id"], 0,
+                                              [original])
+        self.assertEqual(saved["rows"][0]["date"], "2026-09-22")
+        replay, created = self.store.save_record_set(self.owner, document["id"], job["id"],
+                                                     0, [original])
+        self.assertFalse(created)
+        self.assertEqual(replay["revision"], 1)
+        self.assertEqual(original["date"], "2026/9/22")
+        reopened = Store(Path(self.tmp.name))
+        self.assertEqual(reopened.record_set(self.owner, document["id"])["rows"][0]["date"],
+                         "2026-09-22")
+        self.assertEqual(reopened.job(self.owner, job["id"], "management")["result"],
+                         original_result)
 
     def test_source_kind_and_values_are_checked(self):
         purchase, job = self.source("purchase_order", b"kind")

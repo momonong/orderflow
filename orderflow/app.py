@@ -27,7 +27,7 @@ from pypdf import PdfReader
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
-from .records import KINDS, validate_rows
+from .records import KINDS, RecordRowsError, validate_rows
 
 VERSION = "0.3.0"
 PREFIX = "/orderflow/"
@@ -1274,6 +1274,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(404, "RECORD_SOURCE_NOT_FOUND")
                 return
             except ValueError as exc:
+                if isinstance(exc, RecordRowsError):
+                    self.json_response(400, {"error_code": "RECORD_ROWS_INVALID", "errors": exc.errors})
+                    return
                 code = str(exc)
                 conflicts = {"RECORD_VERSION_CONFLICT", "RECORD_SOURCE_CONFLICT",
                              "RECORD_LINK_NOT_FOUND", "RECORD_LINK_CONFLICT", "RECORD_LINKED_ROW",

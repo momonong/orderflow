@@ -18,6 +18,8 @@ FIELDS = ("id", "orderNo", "invoiceNo", "client", "product", "code", "qty",
 DECIMAL_RE = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,4})?$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+SLASH_DATE_RE = re.compile(r"^([0-9]{4})/([0-9]{1,2})/([0-9]{1,2})$")
+MAX_ROW_ERRORS = 20
 
 
 def is_uuid(value: object) -> bool:
@@ -43,58 +45,105 @@ def decimal_string(value: object, *, positive: bool = False) -> str | None:
     return value
 
 
-def nullable_text(value: object, limit: int) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip() or len(value) > limit or "\x00" in value:
-        raise ValueError("RECORD_ROWS_INVALID")
-    return value
+class RecordRowsError(ValueError):
+    """A bounded, value-free list of human-editable row errors."""
+
+    def __init__(self, errors: list[dict]):
+        super().__init__("RECORD_ROWS_INVALID")
+        self.errors = errors[:MAX_ROW_ERRORS]
+
+
+def canonical_record_date(value: str) -> str:
+    """Accept exact ISO or explicit year/month/day; reject ambiguous dates."""
+    if DATE_RE.fullmatch(value):
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError("DATE_INVALID") from None
+        if parsed.isoformat() != value:
+            raise ValueError("DATE_FORMAT")
+        return value
+    match = SLASH_DATE_RE.fullmatch(value)
+    if not match:
+        raise ValueError("DATE_FORMAT")
+    try:
+        return date(*(int(part) for part in match.groups())).isoformat()
+    except ValueError:
+        raise ValueError("DATE_INVALID") from None
 
 
 def validate_rows(value: object, kind: str) -> list[dict]:
     if kind not in KINDS or not isinstance(value, list) or not 1 <= len(value) <= 100:
-        raise ValueError("RECORD_ROWS_INVALID")
+        raise RecordRowsError([{"row_id": None, "index": None, "field": "rows", "code": "ROW_COUNT"}])
     result: list[dict] = []
+    errors: list[dict] = []
     ids: set[str] = set()
-    for raw in value:
+
+    def issue(index: int, raw: dict, field: str, code: str) -> None:
+        if len(errors) < MAX_ROW_ERRORS:
+            errors.append({"row_id": raw["id"] if is_uuid(raw.get("id")) else None,
+                           "index": index, "field": field, "code": code})
+
+    for index, raw in enumerate(value, 1):
         if not isinstance(raw, dict) or set(raw) != set(FIELDS) or not is_uuid(raw["id"]):
-            raise ValueError("RECORD_ROWS_INVALID")
-        if raw["id"] in ids or type(raw["deleted"]) is not bool:
-            raise ValueError("RECORD_ROWS_INVALID")
+            issue(index, raw if isinstance(raw, dict) else {}, "row", "ROW_FORMAT")
+            continue
+        if raw["id"] in ids:
+            issue(index, raw, "id", "ROW_ID_DUPLICATE")
         ids.add(raw["id"])
+        if type(raw["deleted"]) is not bool:
+            issue(index, raw, "deleted", "BOOLEAN_REQUIRED")
         row = {"id": raw["id"], "deleted": raw["deleted"]}
         for field, limit in TEXT_LIMITS.items():
-            row[field] = nullable_text(raw[field], limit)
-        if row["currency"] is not None and not CURRENCY_RE.fullmatch(row["currency"]):
-            raise ValueError("RECORD_ROWS_INVALID")
-        if row["date"] is not None:
-            if not DATE_RE.fullmatch(row["date"]):
-                raise ValueError("RECORD_ROWS_INVALID")
+            item = raw[field]
+            row[field] = item
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item.strip() or "\x00" in item:
+                issue(index, raw, field, "TEXT_INVALID")
+            elif len(item) > limit:
+                issue(index, raw, field, "TEXT_TOO_LONG")
+        if isinstance(row["currency"], str) and row["currency"].strip() and len(row["currency"]) <= 3:
+            if not CURRENCY_RE.fullmatch(row["currency"]):
+                issue(index, raw, "currency", "CURRENCY_FORMAT")
+        if isinstance(row["date"], str) and row["date"].strip() and len(row["date"]) <= 10:
             try:
-                if date.fromisoformat(row["date"]).isoformat() != row["date"]:
-                    raise ValueError
-            except ValueError:
-                raise ValueError("RECORD_ROWS_INVALID") from None
+                row["date"] = canonical_record_date(row["date"])
+            except ValueError as exc:
+                issue(index, raw, "date", str(exc))
         for field in ("qty", "unitPrice", "amount"):
-            row[field] = decimal_string(raw[field], positive=field == "qty")
+            item = raw[field]
+            row[field] = item
+            if item is None:
+                continue
+            if not isinstance(item, str) or not DECIMAL_RE.fullmatch(item):
+                issue(index, raw, field, "DECIMAL_FORMAT")
+            elif field == "qty" and Decimal(item) <= 0:
+                issue(index, raw, field, "POSITIVE_REQUIRED")
         if kind == "purchase_order":
-            if row["invoiceNo"] is not None or raw["linked_order_row_id"] is not None:
-                raise ValueError("RECORD_ROWS_INVALID")
-            if raw["status"] not in {"確認中", "確定"}:
-                raise ValueError("RECORD_ROWS_INVALID")
+            if row["invoiceNo"] is not None:
+                issue(index, raw, "invoiceNo", "FIELD_NOT_ALLOWED")
+            if raw["linked_order_row_id"] is not None:
+                issue(index, raw, "linked_order_row_id", "FIELD_NOT_ALLOWED")
+            if not isinstance(raw["status"], str) or raw["status"] not in {"確認中", "確定"}:
+                issue(index, raw, "status", "STATUS_INVALID")
             row["status"] = raw["status"]
             row["linked_order_row_id"] = None
         else:
-            if row["orderNo"] is not None or raw["status"] is not None:
-                raise ValueError("RECORD_ROWS_INVALID")
+            if row["orderNo"] is not None:
+                issue(index, raw, "orderNo", "FIELD_NOT_ALLOWED")
+            if raw["status"] is not None:
+                issue(index, raw, "status", "FIELD_NOT_ALLOWED")
             link = raw["linked_order_row_id"]
             if link is not None and not is_uuid(link):
-                raise ValueError("RECORD_ROWS_INVALID")
+                issue(index, raw, "linked_order_row_id", "ROW_ID_INVALID")
             row["status"] = None
             row["linked_order_row_id"] = link
         if not row["deleted"] and row["product"] is None and row["code"] is None:
-            raise ValueError("RECORD_ROWS_INVALID")
+            issue(index, raw, "product", "PRODUCT_OR_CODE_REQUIRED")
         result.append({field: row[field] for field in FIELDS})
+    if errors:
+        raise RecordRowsError(errors)
     return result
 
 
