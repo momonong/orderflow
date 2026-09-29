@@ -32,6 +32,8 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 2026-09-29 日期與保存錯誤修正已部署：GitHub [PR #9](https://github.com/momonong/orderflow/pull/9) 合併提交 `9abdfd8e4f6999f281206644c32519298192851d`，ASUS runtime 為 `37a404fcea6331b3be984fdfc9e3756c56cc54bd`，兩者 Git tree 相同。一次性 root gate 回報備份及 SQLite/PDF/session 保留通過；獨立唯讀核對的服務、靜態檔與公開入口見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)。此版只修正日期輸入與儲存錯誤定位，不變更 Google 辨識逾時或重試語義；人工驗收仍待完成。
 
+2026-09-30 管理頁安全錯誤資訊複製已部署：GitHub [PR #11](https://github.com/momonong/orderflow/pull/11) 合併提交與 ASUS runtime 均為 `24bd38ca849159a21a1c692b7d9db8d62e8cffe3`。可從既有結果不明或失敗的辨識工作複製僅含白名單欄位的摘要，不需重新送出付費請求。一次性 root gate 回報備份及 SQLite/PDF/session 保留通過；正式站靜態檔、服務與公開入口的唯讀核對見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)。辨識逾時原因與重試語義未變，正式站登入後操作及人工驗收仍待完成。
+
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 
 公開模式額外限制：每個 session 最多 20 份 PDF、整個資料目錄的正式文件合計最多 128 MiB、每份文件最多 10 次辨識工作；同時最多 2 個上傳檢查及 1 個 Google 辨識。超過限制會拒絕新請求，不自動刪除既有文件。資料預設持久保存；HP 遷移時有一次性 root-only 備份，但**尚未建立 ASUS 持續備份、保留期限或自動清理政策**；服務負責者需核對磁碟與資料目錄。ASUS unit 使用靜態 `orderflow` 系統帳號及 0700 `StateDirectory`；程式碼由 root 持有，登入 bcrypt hash 透過 systemd credential 唯讀交給應用。HP v0.2 的首次安裝腳本與 unit 只留在 Git 歷史及主機原始備份中；正式分支不提供重跑入口。不得以過時的 HP 資料直接回復目前 ASUS 服務。
@@ -44,6 +46,7 @@ node tests/test_report.cjs
 node tests/test_guided_flow.cjs
 node tests/test_startup.cjs
 node tests/test_management_ui.cjs
+node tests/test_management_error_copy.cjs
 node tests/test_records_ui.cjs
 node --check web/app.js
 node --check web/manage.js
