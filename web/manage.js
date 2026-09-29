@@ -94,6 +94,7 @@ function showLogin(message = "請輸入網站密碼。", preserveEditor = false)
   state.pendingFile = null; state.pendingKind = null; state.key = false;
   state.pendingJobKeys.clear(); el("csv-export").hidden = true;
   el("retry-upload").hidden = true;
+  clearJobErrorTools();
   status("login-status", message);
 }
 function showWorkspace(data) {
@@ -193,6 +194,7 @@ function renderJobs() {
 function clearDraft() {
   state.job = null; state.rows = []; state.revision = 0; state.dirty = false;
   el("rows").replaceChildren(); status("job-status", "尚未啟動。");
+  clearJobErrorTools();
   el("draft-source").textContent = "完成真正辨識後，才會在這裡顯示可編修的品項。";
   status("draft-status", "尚無管理草稿。未儲存的編修在重新整理後會消失。");
   renderJobs(); refreshControls();
@@ -219,13 +221,69 @@ function editRows(rows) {
 }
 function markDirty() { state.editSerial++; state.dirty = true;
   status("draft-status", "有未儲存的編修；重新整理後會消失。", "unknown"); refreshControls(); }
+function utcTime(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) return "unknown";
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) ? time.toISOString() : "unknown";
+}
+function jobErrorSummary(job) {
+  const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const id = typeof job.id === "string" && validUuid.test(job.id) ? job.id : "unknown";
+  const code = typeof job.error_code === "string" && /^[A-Z0-9_]{2,40}$/.test(job.error_code)
+    ? job.error_code : "UNKNOWN";
+  const created = utcTime(job.created_ms);
+  const started = utcTime(job.started_ms);
+  const finished = utcTime(job.finished_ms);
+  const elapsed = created !== "unknown" && started !== "unknown" && finished !== "unknown" &&
+    job.started_ms >= job.created_ms && job.finished_ms >= job.started_ms
+    ? String(job.finished_ms - job.started_ms) : "unknown";
+  const steps = job.steps || {};
+  const upstreamStatus = Number.isInteger(steps.upstream_http_status) &&
+    steps.upstream_http_status >= 100 && steps.upstream_http_status <= 599
+    ? String(steps.upstream_http_status) : "unknown";
+  const upstreamReason = ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"]
+    .includes(steps.upstream_reason) ? steps.upstream_reason : "unknown";
+  return ["OrderFlow 辨識錯誤資訊", `job_id: ${id}`,
+    `state: ${job.state === "failed" ? "failed" : "unknown"}`, `error_code: ${code}`,
+    `created_utc: ${created}`, `started_utc: ${started}`, `finished_utc: ${finished}`,
+    `elapsed_ms: ${elapsed}`, `upstream_http_status: ${upstreamStatus}`,
+    `upstream_reason: ${upstreamReason}`].join("\n");
+}
+function clearJobErrorTools() {
+  el("job-error-tools").hidden = true;
+  el("job-error-details").value = "";
+  status("job-error-copy-status", "");
+}
+function renderJobErrorTools(job) {
+  clearJobErrorTools();
+  if (job.state !== "failed" && job.state !== "unknown") return;
+  el("job-error-details").value = jobErrorSummary(job);
+  el("job-error-tools").hidden = false;
+}
+async function copyJobError() {
+  const selected = state.job;
+  if (el("job-error-tools").hidden || !selected ||
+      (selected.state !== "failed" && selected.state !== "unknown")) return;
+  const details = el("job-error-details");
+  const text = jobErrorSummary(selected);
+  details.value = text;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(text);
+    if (state.job === selected) status("job-error-copy-status", "已複製此筆錯誤資訊。", "good");
+  } catch {
+    if (state.job !== selected) return;
+    details.focus(); details.select();
+    status("job-error-copy-status", "無法自動複製；已選取摘要，請按 Ctrl/Cmd+C 手動複製。", "unknown");
+  }
+}
 function selectJob(id) {
   const job = state.jobs.find(item => item.id === id && item.document_id === state.selected);
   if (!job) { clearDraft(); return; }
-  state.job = job; renderJobs();
+  state.job = job; renderJobs(); renderJobErrorTools(job);
   if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
     clearDraftEditor(); pollJob(id); return; }
-  if (job.state !== "done") { status("job-status", `辨識${job.state === "unknown" ? "結果不明" : "失敗"}：${job.error_code || "UNKNOWN"}${job.steps?.upstream_http_status ? ` · Google HTTP ${job.steps.upstream_http_status}` : ""}${job.steps?.upstream_reason ? ` · ${job.steps.upstream_reason}` : ""}。不會自動重試。`, job.state === "unknown" ? "unknown" : "error");
+  if (job.state !== "done") { status("job-status", `辨識${job.state === "unknown" ? "結果不明" : "失敗"}：${job.error_code || "UNKNOWN"}${job.steps?.upstream_http_status ? ` · Google HTTP ${job.steps.upstream_http_status}` : ""}${job.steps?.upstream_reason ? ` · ${job.steps.upstream_reason}` : ""}。請求可能已送達 Google 並計費；請勿連續按辨識。系統不會自動重試。`, job.state === "unknown" ? "unknown" : "error");
     clearDraftEditor(); return; }
   status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
   const selectedDoc = state.documents.find(doc => doc.id === state.selected);
@@ -902,6 +960,7 @@ el("retry-upload").addEventListener("click", upload);
 el("set-key").addEventListener("click", setKey);
 el("clear-key").addEventListener("click", clearKey);
 el("recognize").addEventListener("click", recognize);
+el("copy-job-error").addEventListener("click", copyJobError);
 el("add-row").addEventListener("click", () => {
   if (state.rows.length >= 100) return;
   const kind = selectedDocumentKind();

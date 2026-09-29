@@ -36,7 +36,7 @@ button:disabled {
   opacity:.52;
   cursor:not-allowed
 }
-button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible,.upload-box:focus-within {
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible,.upload-box:focus-within {
   outline:3px solid #d9a428;
   outline-offset:2px
 }
@@ -444,6 +444,30 @@ th.num,td.num {
   border-left:3px solid #e4aa3d;
   padding:11px 14px;
   border-radius:6px
+}
+.job-error-tools {
+  display:grid;
+  gap:8px;
+  margin:12px 0
+}
+.job-error-tools label {
+  font-size:12px;
+  font-weight:600
+}
+.job-error-tools textarea {
+  width:100%;
+  min-width:0;
+  padding:10px;
+  border:1px solid var(--border-strong);
+  border-radius:8px;
+  background:var(--subtle);
+  color:var(--text);
+  font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;
+  overflow-wrap:anywhere;
+  resize:vertical
+}
+.job-error-tools button {
+  justify-self:start
 }
 .document-list,.job-list {
   display:flex;
