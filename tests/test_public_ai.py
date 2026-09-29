@@ -134,21 +134,72 @@ class PublicAiTests(unittest.TestCase):
         self.assertTrue(uuid.UUID(self.last_headers["X-Orderflow-Request-Id"]))
         self.assertNotEqual(self.last_headers["X-Orderflow-Request-Id"], "not-a-uuid")
 
+    def test_typed_record_api_requires_real_source_and_session(self):
+        upload_headers = {"Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+                          "X-File-SHA256": hashlib.sha256(PDF).hexdigest(),
+                          "X-Request-Key": str(uuid.uuid4()), "X-Document-Kind": "purchase_order"}
+        without_kind = dict(upload_headers)
+        without_kind.pop("X-Document-Kind")
+        self.assertEqual(self.request("POST", "/orderflow/api/management/documents",
+                                      PDF, without_kind, self.cookie)[0], 400)
+        status, document, _ = self.request("POST", "/orderflow/api/management/documents",
+                                           PDF, upload_headers, self.cookie)
+        self.assertEqual(status, 201)
+        self.assertEqual(document["document_kind"], "purchase_order")
+        upload_headers["X-Request-Key"] = str(uuid.uuid4())
+        status, duplicate, _ = self.request("POST", "/orderflow/api/management/documents",
+                                            PDF, upload_headers, self.cookie)
+        self.assertEqual((status, duplicate["id"], duplicate["duplicate"]),
+                         (201, document["id"], True))
+        record_path = "/orderflow/api/management/record-sets/" + document["id"]
+        row = {"id": str(uuid.uuid4()), "orderNo": "PO-[1]", "invoiceNo": None,
+               "client": None, "product": " A//[β]  B ", "code": None, "qty": "2.50",
+               "unitPrice": None, "amount": None, "currency": None, "date": None,
+               "incoterms": None, "unit": "PCS", "status": "確認中",
+               "linked_order_row_id": None, "deleted": False}
+        body = {"source_job_id": str(uuid.uuid4()), "revision": 0, "rows": [row]}
+        status, _, _ = self.request("PUT", record_path, json.dumps(body),
+                                    {"Content-Type": "application/json"}, self.cookie)
+        self.assertEqual(status, 404, "unrelated real job must not create records")
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        with patch.object(GeminiAdapter, "recognize", return_value={"items": [{
+                "orderNo": "PO-[1]", "product": " A//[β]  B ", "qty": "2.50", "unit": "PCS"}]}):
+            status, job, _ = self.post_json("/orderflow/api/management/jobs", {
+                "document_id": document["id"], "request_key": str(uuid.uuid4()), "scenario": "real"})
+            self.assertEqual(status, 202)
+            for _ in range(100):
+                ready = self.request("GET", "/orderflow/api/management/jobs/" + job["id"],
+                                     cookie=self.cookie)[1]
+                if ready["state"] == "done":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(ready["state"], "done")
+        self.assertEqual(ready["result"][0]["product"], " A//[β]  B ")
+        body["source_job_id"] = job["id"]
+        status, saved, _ = self.request("PUT", record_path, json.dumps(body),
+                                        {"Content-Type": "application/json"}, self.cookie)
+        self.assertEqual((status, saved["revision"]), (201, 1))
+        bootstrap = self.request("GET", "/orderflow/api/management/bootstrap", cookie=self.cookie)[1]
+        self.assertEqual(bootstrap["record_sets"][0]["rows"][0]["product"], " A//[β]  B ")
+        self.assertNotIn("record_sets", self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[1])
+        self.assertEqual(self.request("GET", record_path, cookie="of_session=bad")[0], 401)
+        other_cookie, _ = self.login(cookie="")
+        self.assertEqual(self.request("GET", record_path, cookie=other_cookie)[0], 404)
+        self.assertEqual(self.request("PUT", record_path, json.dumps(body),
+                                      {"Content-Type": "application/json"}, other_cookie)[0], 404)
+
     def test_management_scope_real_job_and_draft_revision(self):
         diagnostic = self.upload()[1]
+        # Existing unclassified management documents remain readable/editable;
+        # the new upload API requires an explicit kind for new documents.
         key = str(uuid.uuid4())
-        status, managed, _ = self.request("POST", "/orderflow/api/management/documents", PDF, {
-            "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
-            "X-File-SHA256": hashlib.sha256(PDF).hexdigest(), "X-Request-Key": key,
-        }, self.cookie)
-        self.assertEqual(status, 201)
+        owner = self.store.session(self.cookie.split("=", 1)[1])
+        managed = self.store.add_document(owner, key, PDF, hashlib.sha256(PDF).hexdigest(),
+                                          1, 1, "management")
         self.assertNotEqual(managed["id"], diagnostic["id"])
-        # Replaying a management upload does not create a second document.
-        status, replay, _ = self.request("POST", "/orderflow/api/management/documents", PDF, {
-            "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
-            "X-File-SHA256": hashlib.sha256(PDF).hexdigest(), "X-Request-Key": key,
-        }, self.cookie)
-        self.assertEqual((status, replay["id"]), (201, managed["id"]))
+        replay = self.store.add_document(owner, key, PDF, hashlib.sha256(PDF).hexdigest(),
+                                         1, 1, "management")
+        self.assertEqual(replay["id"], managed["id"])
         diagnostic_view = self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[1]
         management_view = self.request("GET", "/orderflow/api/management/bootstrap", cookie=self.cookie)[1]
         self.assertEqual([doc["id"] for doc in diagnostic_view["documents"]], [diagnostic["id"]])
@@ -446,6 +497,30 @@ class GeminiAdapterTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(payload["contents"][0]["parts"][1]["inline_data"]["mime_type"], "application/pdf")
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+
+    def test_typed_invoice_request_uses_full_nullable_field_schema(self):
+        seen = {}
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return None
+            def read(self, size):
+                return b'{"candidates":[{"content":{"parts":[{"text":"{\\"items\\":[]}"}]}}]}'
+        def fake_open(request, timeout):
+            seen["request"] = request
+            return Response()
+        with tempfile.TemporaryDirectory() as temp, patch("orderflow.gemini.urllib.request.urlopen", side_effect=fake_open):
+            file = Path(temp) / "sample.pdf"
+            file.write_bytes(PDF)
+            self.assertEqual(GeminiAdapter(FAKE_KEY, "invoice").recognize(str(file), deadline_seconds=25),
+                             {"items": []})
+        payload = json.loads(seen["request"].data)
+        properties = payload["generationConfig"]["responseSchema"]["properties"]["items"]["items"]["properties"]
+        self.assertTrue({"invoiceNo", "client", "product", "code", "qty", "unitPrice", "amount",
+                         "currency", "date", "incoterms", "unit"}.issubset(properties))
+        prompt = payload["contents"][0]["parts"][0]["text"]
+        self.assertIn("a Company label may identify the issuer", prompt)
+        self.assertIn("never infer customer, currency, date, zero", prompt)
+        self.assertNotIn(FAKE_KEY, seen["request"].data.decode())
 
     def test_sanitized_google_errors(self):
         for status, code in [(401, "AI_AUTH_FAILED"), (403, "AI_AUTH_FAILED"), (429, "AI_RATE_LIMITED"), (400, "AI_BAD_REQUEST"), (404, "AI_MODEL_UNAVAILABLE")]:
