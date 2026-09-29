@@ -93,5 +93,17 @@ context.api = async (path, options) => {
   assert.equal(calls[0].path, 'management/jobs');
   assert.equal(calls[0].method, 'POST');
   assert.equal(JSON.parse(calls[0].body).scenario, 'real');
-  console.log('management save, refresh, and paid confirmation: ok');
+  calls = [];
+  context.api = async (path, options) => {
+    calls.push({path, method: options.method, body: JSON.parse(options.body)});
+    throw {code:'REQUEST_TIMEOUT'};
+  };
+  await vm.runInContext('recognize()', context);
+  assert.equal(calls.length, 1, 'uncertain paid request is never automatically reposted');
+  assert.match(el('job-status').textContent, /不會自動重送/);
+  await vm.runInContext('recognize()', context);
+  assert.equal(calls.length, 2, 'a second user confirmation is required');
+  assert.equal(calls[0].body.request_key, calls[1].body.request_key,
+    'explicit retry after unknown result retains the original paid-job idempotency key');
+  console.log('management save, refresh, paid confirmation and uncertain retry: ok');
 })().catch(error => {console.error(error); process.exitCode = 1;});

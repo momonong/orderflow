@@ -1,6 +1,6 @@
 # OrderFlow 物流管理草稿與診斷測試
 
-管理首頁可直接上傳 PDF、明確啟動 Google 辨識、人工編修並儲存品項草稿；目前沒有正式訂單、出貨或實體庫存紀錄。原有診斷測試移至 `/orderflow/test/`，仍提供固定資料模擬與真實辨識。兩種用途的文件和工作彼此隔離。詳細契約與待決事項見 [管理介面第一增量](docs/management-shell-phase1.md)。
+本版管理首頁依使用者單檔原型提供儀表板、採購單與發票 PDF 上傳、人工確認的訂單／發票紀錄、發票金額統計、訂購與開票數量對照及 CSV 匯出。Google 辨識仍由網站後端執行，必須明確確認付費請求；已確認資料保存在 SQLite，原 PDF 與 AI 工作結果保留。發票不等於實際出貨，數量差不等於待出貨或實體庫存。這是尚未部署的新階段；目前 ASUS 上線版本仍見下方部署紀錄。新契約見 [原型繼承與採購單／發票管理](docs/prototype-management-phase2.md)，既有未分類品項草稿與診斷流程見 [管理介面第一增量](docs/management-shell-phase1.md)。
 
 ## 本機啟動
 
@@ -40,6 +40,7 @@ node tests/test_report.cjs
 node tests/test_guided_flow.cjs
 node tests/test_startup.cjs
 node tests/test_management_ui.cjs
+node tests/test_records_ui.cjs
 node --check web/app.js
 node --check web/manage.js
 ```

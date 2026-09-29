@@ -27,6 +27,7 @@ from pypdf import PdfReader
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
+from .records import KINDS, validate_rows
 
 VERSION = "0.3.0"
 PREFIX = "/orderflow/"
@@ -40,6 +41,7 @@ SCENARIOS = {"success", "fail", "timeout", "invalid", "real"}
 KEY_TTL_SECONDS = 15 * 60
 PURPOSES = {"diagnostic", "management"}
 MAX_DRAFT_JSON_BYTES = 32 * 1024
+MAX_RECORD_JSON_BYTES = 128 * 1024
 MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
 MAX_JOBS_PER_DOCUMENT = 10
@@ -162,12 +164,31 @@ class Store:
             if "purpose" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN purpose TEXT NOT NULL "
                            "DEFAULT 'diagnostic' CHECK (purpose IN ('diagnostic','management'))")
+            if "document_kind" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN document_kind TEXT "
+                           "CHECK (document_kind IN ('purchase_order','invoice'))")
             db.execute("""CREATE TABLE IF NOT EXISTS management_drafts (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                 document_id TEXT NOT NULL REFERENCES documents(id),
                 source_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
                 rows_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
                 updated_ms INTEGER NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS management_upload_keys (
+                session_id TEXT NOT NULL, request_key TEXT NOT NULL,
+                document_id TEXT NOT NULL REFERENCES documents(id),
+                sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+                document_kind TEXT NOT NULL CHECK (document_kind IN ('purchase_order','invoice')),
+                PRIMARY KEY (session_id, request_key)
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS management_record_sets (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+                source_job_id TEXT NOT NULL REFERENCES jobs(id),
+                kind TEXT NOT NULL CHECK (kind IN ('purchase_order','invoice')),
+                rows_json TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL
             )""")
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
@@ -256,10 +277,21 @@ class Store:
         if purpose not in PURPOSES:
             raise ValueError("invalid purpose")
         with self.db() as db:
-            rows = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count FROM documents "
-                              "WHERE session_id=? AND purpose=? ORDER BY created_ms DESC",
+            rows = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count,document_kind "
+                              "FROM documents WHERE session_id=? AND purpose=? ORDER BY created_ms DESC",
                               (session_id, purpose)).fetchall()
-        return [dict(row) | {"steps": json.loads(row["steps"])} for row in rows]
+        result = [dict(row) | {"steps": json.loads(row["steps"])} for row in rows]
+        if purpose == "diagnostic":
+            for item in result:
+                item.pop("document_kind")
+        return result
+
+    def document_info(self, session_id: str, document_id: str, purpose: str) -> dict | None:
+        with self.db() as db:
+            row = db.execute("SELECT id,document_kind,sha256 FROM documents "
+                             "WHERE id=? AND session_id=? AND purpose=?",
+                             (document_id, session_id, purpose)).fetchone()
+        return dict(row) if row else None
 
     def jobs(self, session_id: str, purpose: str = "diagnostic") -> list[dict]:
         if purpose not in PURPOSES:
@@ -292,25 +324,68 @@ class Store:
         return self.public_job(row) if row else None
 
     def add_document(self, session_id: str, request_key: str, data: bytes, sha: str,
-                     elapsed: int, page_count: int, purpose: str = "diagnostic") -> dict:
-        if purpose not in PURPOSES:
-            raise ValueError("invalid purpose")
+                     elapsed: int, page_count: int, purpose: str = "diagnostic",
+                     document_kind: str | None = None) -> dict:
+        if purpose not in PURPOSES or document_kind is not None and (
+                purpose != "management" or document_kind not in KINDS):
+            raise ValueError("DOCUMENT_KIND_INVALID")
         stored_key = request_key if purpose == "diagnostic" else f"management:{request_key}"
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            existing = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count FROM documents "
+            fields = "id,size,sha256,created_ms,upload_ms,steps,page_count,document_kind"
+            existing = db.execute(f"SELECT {fields} FROM documents "
                                   "WHERE session_id=? AND request_key=? AND purpose=?",
                                   (session_id, stored_key, purpose)).fetchone()
             if existing:
-                if existing["sha256"] != sha or existing["size"] != len(data):
+                if (existing["sha256"] != sha or existing["size"] != len(data)
+                        or existing["document_kind"] != document_kind):
                     raise ValueError("IDEMPOTENCY_CONFLICT")
-                return dict(existing) | {"steps": json.loads(existing["steps"])}
+                result = dict(existing) | {"steps": json.loads(existing["steps"])}
+                if purpose == "management":
+                    result["duplicate"] = True
+                else:
+                    result.pop("document_kind")
+                return result
+            if purpose == "management" and document_kind in KINDS:
+                alias = db.execute("SELECT document_id,sha256,size,document_kind "
+                                   "FROM management_upload_keys WHERE session_id=? AND request_key=?",
+                                   (session_id, stored_key)).fetchone()
+                if alias:
+                    if (alias["sha256"] != sha or alias["size"] != len(data)
+                            or alias["document_kind"] != document_kind):
+                        raise ValueError("IDEMPOTENCY_CONFLICT")
+                    aliased = db.execute(f"SELECT {fields} FROM documents WHERE id=? "
+                                         "AND session_id=? AND purpose='management' "
+                                         "AND document_kind=?",
+                                         (alias["document_id"], session_id, document_kind)).fetchone()
+                    if not aliased:
+                        raise ValueError("IDEMPOTENCY_CONFLICT")
+                    return dict(aliased) | {"steps": json.loads(aliased["steps"]),
+                                            "duplicate": True}
+                duplicate = db.execute(f"SELECT {fields} FROM documents "
+                                       "WHERE session_id=? AND purpose='management' "
+                                       "AND document_kind=? AND sha256=? ORDER BY created_ms LIMIT 1",
+                                       (session_id, document_kind, sha)).fetchone()
+                if duplicate:
+                    db.execute("INSERT INTO management_upload_keys "
+                               "(session_id,request_key,document_id,sha256,size,document_kind) "
+                               "VALUES (?,?,?,?,?,?)",
+                               (session_id, stored_key, duplicate["id"], sha, len(data), document_kind))
+                    return dict(duplicate) | {"steps": json.loads(duplicate["steps"]),
+                                              "duplicate": True}
             if self.public_limits:
                 count = db.execute("SELECT COUNT(*) FROM documents WHERE session_id=? AND purpose=?",
                                    (session_id, purpose)).fetchone()[0]
                 total = db.execute("SELECT COALESCE(SUM(size),0) FROM documents").fetchone()[0]
                 if count >= MAX_DOCUMENTS_PER_SESSION or total + len(data) > MAX_STORED_BYTES:
                     raise ValueError("STORAGE_LIMIT")
+            same_pdf_other_kind = False
+            if purpose == "management" and document_kind in KINDS:
+                same_pdf_other_kind = db.execute(
+                    "SELECT 1 FROM documents WHERE session_id=? AND purpose='management' "
+                    "AND document_kind IN ('purchase_order','invoice') "
+                    "AND document_kind<>? AND sha256=? LIMIT 1",
+                    (session_id, document_kind, sha)).fetchone() is not None
             doc_id = str(uuid.uuid4())
             path = self.files / f"{doc_id}.pdf"
             with path.open("xb") as file:
@@ -322,14 +397,24 @@ class Store:
             steps = json.dumps({"upload": "pass", "integrity": "pass"})
             try:
                 db.execute("INSERT INTO documents (id,session_id,request_key,size,sha256,created_ms,"
-                           "upload_ms,steps,page_count,purpose) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           "upload_ms,steps,page_count,purpose,document_kind) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                            (doc_id, session_id, stored_key, len(data), sha, timestamp, elapsed,
-                            steps, page_count, purpose))
+                            steps, page_count, purpose, document_kind))
+                if purpose == "management" and document_kind in KINDS:
+                    db.execute("INSERT INTO management_upload_keys "
+                               "(session_id,request_key,document_id,sha256,size,document_kind) "
+                               "VALUES (?,?,?,?,?,?)",
+                               (session_id, stored_key, doc_id, sha, len(data), document_kind))
             except Exception:
                 path.unlink(missing_ok=True)
                 raise
-        return {"id": doc_id, "size": len(data), "sha256": sha, "created_ms": timestamp,
-                "upload_ms": elapsed, "steps": json.loads(steps), "page_count": page_count}
+        result = {"id": doc_id, "size": len(data), "sha256": sha, "created_ms": timestamp,
+                  "upload_ms": elapsed, "steps": json.loads(steps), "page_count": page_count}
+        if purpose == "management":
+            result.update(document_kind=document_kind, duplicate=False,
+                          same_pdf_other_kind=same_pdf_other_kind)
+        return result
 
     def add_job(self, session_id: str, document_id: str, request_key: str,
                 scenario: str, purpose: str = "diagnostic") -> tuple[dict, bool]:
@@ -376,7 +461,8 @@ class Store:
                               "JOIN jobs j ON j.id=m.source_job_id AND j.document_id=m.document_id "
                               "JOIN documents d ON d.id=m.document_id "
                               "WHERE m.session_id=? AND j.session_id=? AND d.session_id=? "
-                              "AND d.purpose='management' ORDER BY m.updated_ms DESC",
+                              "AND d.purpose='management' AND d.document_kind IS NULL "
+                              "ORDER BY m.updated_ms DESC",
                               (session_id, session_id, session_id)).fetchall()
         return [self.public_draft(row) for row in rows]
 
@@ -387,7 +473,8 @@ class Store:
                              "JOIN jobs j ON j.id=m.source_job_id AND j.document_id=m.document_id "
                              "JOIN documents d ON d.id=m.document_id "
                              "WHERE m.session_id=? AND j.session_id=? AND d.session_id=? "
-                             "AND d.purpose='management' AND m.source_job_id=?",
+                             "AND d.purpose='management' AND d.document_kind IS NULL "
+                             "AND m.source_job_id=?",
                              (session_id, session_id, session_id, source_job_id)).fetchone()
         return self.public_draft(row) if row else None
 
@@ -402,7 +489,8 @@ class Store:
             source = db.execute("SELECT j.document_id FROM jobs j "
                                 "JOIN documents d ON d.id=j.document_id "
                                 "WHERE j.id=? AND j.session_id=? AND d.session_id=? "
-                                "AND d.purpose='management' AND j.scenario='real' AND j.state='done'",
+                                "AND d.purpose='management' AND d.document_kind IS NULL "
+                                "AND j.scenario='real' AND j.state='done'",
                                 (source_job_id, session_id, session_id)).fetchone()
             if not source:
                 raise LookupError("DRAFT_SOURCE_NOT_FOUND")
@@ -432,6 +520,140 @@ class Store:
                                "FROM management_drafts WHERE id=?", (draft_id,)).fetchone()
         return self.public_draft(saved), created
 
+    @staticmethod
+    def public_record_set(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "document_id": row["document_id"],
+                "source_job_id": row["source_job_id"], "kind": row["kind"],
+                "rows": json.loads(row["rows_json"]), "revision": row["revision"],
+                "created_ms": row["created_ms"], "updated_ms": row["updated_ms"]}
+
+    def record_sets(self, session_id: str) -> list[dict]:
+        with self.db() as db:
+            rows = db.execute("SELECT r.* FROM management_record_sets r "
+                              "JOIN documents d ON d.id=r.document_id "
+                              "WHERE r.session_id=? AND d.session_id=? "
+                              "AND d.purpose='management' AND d.document_kind=r.kind "
+                              "ORDER BY r.updated_ms DESC", (session_id, session_id)).fetchall()
+        return [self.public_record_set(row) for row in rows]
+
+    def record_set(self, session_id: str, document_id: str) -> dict | None:
+        with self.db() as db:
+            row = db.execute("SELECT r.* FROM management_record_sets r "
+                             "JOIN documents d ON d.id=r.document_id "
+                             "WHERE r.session_id=? AND d.session_id=? "
+                             "AND d.purpose='management' AND d.document_kind=r.kind "
+                             "AND r.document_id=?", (session_id, session_id, document_id)).fetchone()
+        return self.public_record_set(row) if row else None
+
+    @staticmethod
+    def _check_link(invoice: dict, order: dict) -> None:
+        for field in ("client", "code", "unit"):
+            if invoice[field] is not None and order[field] is not None and invoice[field] != order[field]:
+                raise ValueError("RECORD_LINK_CONFLICT")
+
+    def save_record_set(self, session_id: str, document_id: str, source_job_id: str,
+                        expected_revision: int, rows: object) -> tuple[dict, bool]:
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("RECORD_VERSION_INVALID")
+        if not valid_uuid(document_id) or not valid_uuid(source_job_id):
+            raise LookupError("RECORD_SOURCE_NOT_FOUND")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = db.execute("SELECT d.document_kind FROM documents d "
+                                "JOIN jobs j ON j.document_id=d.id "
+                                "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
+                                "AND d.document_kind IN ('purchase_order','invoice') "
+                                "AND j.id=? AND j.session_id=? AND j.scenario='real' "
+                                "AND j.state='done'",
+                                (document_id, session_id, source_job_id, session_id)).fetchone()
+            if not source:
+                raise LookupError("RECORD_SOURCE_NOT_FOUND")
+            kind = source["document_kind"]
+            checked = validate_rows(rows, kind)
+            rows_json = json.dumps(checked, ensure_ascii=False, separators=(",", ":"))
+            existing = db.execute("SELECT * FROM management_record_sets "
+                                  "WHERE document_id=? AND session_id=?", (document_id, session_id)).fetchone()
+            if existing:
+                if existing["source_job_id"] != source_job_id or existing["kind"] != kind:
+                    raise ValueError("RECORD_SOURCE_CONFLICT")
+                old_rows = json.loads(existing["rows_json"])
+                new_by_id = {row["id"]: row for row in checked}
+                if not all(row["id"] in new_by_id for row in old_rows):
+                    raise ValueError("RECORD_ROW_REMOVAL_FORBIDDEN")
+                for old_row in old_rows:
+                    new_row = new_by_id[old_row["id"]]
+                    if old_row["deleted"] and new_row != old_row:
+                        raise ValueError("RECORD_ROW_REMOVAL_FORBIDDEN")
+                    if new_row["deleted"] and any(new_row[field] != old_row[field]
+                                                  for field in old_row if field != "deleted"):
+                        raise ValueError("RECORD_ROW_REMOVAL_FORBIDDEN")
+                if existing["rows_json"] == rows_json:
+                    return self.public_record_set(existing), False
+                if existing["revision"] != expected_revision:
+                    raise ValueError("RECORD_VERSION_CONFLICT")
+            elif expected_revision != 0:
+                raise ValueError("RECORD_VERSION_CONFLICT")
+            other_sets = db.execute("SELECT r.rows_json FROM management_record_sets r "
+                                    "JOIN documents d ON d.id=r.document_id "
+                                    "WHERE r.session_id=? AND r.document_id<>? "
+                                    "AND d.session_id=? AND d.purpose='management' "
+                                    "AND d.document_kind=r.kind",
+                                    (session_id, document_id, session_id)).fetchall()
+            other_ids = {row["id"] for record in other_sets
+                         for row in json.loads(record["rows_json"])}
+            if any(row["id"] in other_ids for row in checked):
+                raise ValueError("RECORD_ROW_ID_CONFLICT")
+            if kind == "invoice":
+                linked_ids = {row["linked_order_row_id"] for row in checked
+                              if not row["deleted"] and row["linked_order_row_id"] is not None}
+                if linked_ids:
+                    order_sets = db.execute("SELECT rows_json FROM management_record_sets r "
+                                            "JOIN documents d ON d.id=r.document_id "
+                                            "WHERE r.session_id=? AND r.kind='purchase_order' "
+                                            "AND d.session_id=? AND d.purpose='management' "
+                                            "AND d.document_kind='purchase_order'",
+                                            (session_id, session_id)).fetchall()
+                    orders = {row["id"]: row for record in order_sets
+                              for row in json.loads(record["rows_json"]) if not row["deleted"]}
+                    if not linked_ids.issubset(orders):
+                        raise ValueError("RECORD_LINK_NOT_FOUND")
+                    for row in checked:
+                        if not row["deleted"] and row["linked_order_row_id"]:
+                            self._check_link(row, orders[row["linked_order_row_id"]])
+            else:
+                invoices = db.execute("SELECT rows_json FROM management_record_sets r "
+                                      "JOIN documents d ON d.id=r.document_id "
+                                      "WHERE r.session_id=? AND r.kind='invoice' "
+                                      "AND d.session_id=? AND d.purpose='management' "
+                                      "AND d.document_kind='invoice'", (session_id, session_id)).fetchall()
+                active_orders = {row["id"]: row for row in checked if not row["deleted"]}
+                for invoice_set in invoices:
+                    for invoice in json.loads(invoice_set["rows_json"]):
+                        link = invoice["linked_order_row_id"]
+                        if invoice["deleted"] or link is None:
+                            continue
+                        if link in {row["id"] for row in checked}:
+                            if link not in active_orders:
+                                raise ValueError("RECORD_LINKED_ROW")
+                            self._check_link(invoice, active_orders[link])
+            timestamp = now_ms()
+            if existing:
+                revision = existing["revision"] + 1
+                record_id = existing["id"]
+                db.execute("UPDATE management_record_sets SET rows_json=?,revision=?,updated_ms=? "
+                           "WHERE id=?", (rows_json, revision, timestamp, record_id))
+                created = False
+            else:
+                record_id = str(uuid.uuid4())
+                db.execute("INSERT INTO management_record_sets "
+                           "(id,session_id,document_id,source_job_id,kind,rows_json,revision,created_ms,updated_ms) "
+                           "VALUES (?,?,?,?,?,?,?,?,?)",
+                           (record_id, session_id, document_id, source_job_id, kind, rows_json, 1,
+                            timestamp, timestamp))
+                created = True
+            saved = db.execute("SELECT * FROM management_record_sets WHERE id=?", (record_id,)).fetchone()
+        return self.public_record_set(saved), created
+
     def set_job(self, job_id: str, **fields: object) -> None:
         if "steps" in fields:
             fields["steps"] = json.dumps(fields["steps"], ensure_ascii=False)
@@ -443,13 +665,13 @@ class Store:
 
 
 def run_real_job(store: Store, job_id: str, document_id: str, adapter: GeminiAdapter,
-                 slot: threading.BoundedSemaphore) -> None:
+                 slot: threading.BoundedSemaphore, document_kind: str | None = None) -> None:
     if not slot.acquire(blocking=False):
         store.set_job(job_id, state="failed", error_code="AI_RATE_LIMITED",
                       steps={"ai": "fail", "format": "not_run"}, finished_ms=now_ms())
         return
     try:
-        run_job(store, job_id, document_id, adapter)
+        run_job(store, job_id, document_id, adapter, document_kind)
     finally:
         slot.release()
 
@@ -466,6 +688,31 @@ def validate_result(value: object) -> list[dict]:
                 or row["quantity"] < 0):
             raise ValueError("RESULT_FORMAT_INVALID")
     return [{"description": row["description"], "quantity": row["quantity"]} for row in rows]
+
+
+def validate_management_result(value: object) -> list[dict]:
+    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+        raise ValueError("RESULT_FORMAT_INVALID")
+    items = value["items"]
+    if len(items) > 100:
+        raise ValueError("RESULT_FORMAT_INVALID")
+    fields = ("orderNo", "invoiceNo", "client", "product", "code", "qty", "unitPrice",
+              "amount", "currency", "date", "incoterms", "unit")
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("RESULT_FORMAT_INVALID")
+        row = {}
+        for field in fields:
+            raw = item.get(field)
+            if raw is None:
+                row[field] = None
+            elif isinstance(raw, str) and len(raw) <= 200 and "\x00" not in raw:
+                row[field] = raw if raw.strip() else None
+            else:
+                raise ValueError("RESULT_FORMAT_INVALID")
+        rows.append(row)
+    return rows
 
 
 def validate_draft_rows(value: object) -> list[dict]:
@@ -485,14 +732,15 @@ def validate_draft_rows(value: object) -> list[dict]:
     return rows
 
 
-def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter) -> None:
+def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
+            document_kind: str | None = None) -> None:
     real = isinstance(adapter, GeminiAdapter)
     if real:
         audit_event("real_job", job_id, "start")
     store.set_job(job_id, state="running", started_ms=now_ms())
     try:
         raw = adapter.recognize(str(store.files / f"{document_id}.pdf"), deadline_seconds=25 if real else 5)
-        rows = validate_result(raw)
+        rows = validate_management_result(raw) if document_kind in KINDS else validate_result(raw)
         store.set_job(job_id, state="done", result=rows, steps={"ai": "pass", "format": "pass"},
                       finished_ms=now_ms())
         if real:
@@ -778,6 +1026,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "documents": self.server.store.documents(session_id, "management"),
                                      "jobs": self.server.store.jobs(session_id, "management"),
                                      "drafts": self.server.store.management_drafts(session_id),
+                                     "record_sets": self.server.store.record_sets(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
                                      "ai_model": GEMINI_MODEL,
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
@@ -815,6 +1064,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = self.server.store.job(session_id, job_id, "management")
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
+            return
+        if path.startswith(PREFIX + "api/management/record-sets/"):
+            session_id = self.get_session()
+            if not session_id:
+                return
+            document_id = path[len(PREFIX + "api/management/record-sets/"):]
+            if not valid_uuid(document_id):
+                self.error(404, "RECORD_SET_NOT_FOUND")
+                return
+            record = self.server.store.record_set(session_id, document_id)
+            self.json_response(200, record) if record else self.error(404, "RECORD_SET_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/management/drafts/"):
             session_id = self.get_session()
@@ -948,11 +1208,16 @@ class Handler(BaseHTTPRequestHandler):
                            "JOB_LIMIT" if code == "JOB_LIMIT" else "IDEMPOTENCY_CONFLICT")
                 return
             if created:
-                adapter = GeminiAdapter(ai_key) if scenario == "real" else self.server.adapter_factory(scenario)
+                document = self.server.store.document_info(session_id, document_id, purpose)
+                document_kind = document["document_kind"] if purpose == "management" else None
+                adapter = (GeminiAdapter(ai_key, document_kind) if scenario == "real"
+                           else self.server.adapter_factory(scenario))
                 target = run_real_job if scenario == "real" else run_job
                 arguments = (self.server.store, job["id"], document_id, adapter)
                 if scenario == "real":
-                    arguments += (self.server.real_job_slot,)
+                    arguments += (self.server.real_job_slot, document_kind)
+                else:
+                    arguments += (document_kind,)
                 threading.Thread(target=target, args=arguments, daemon=True).start()
             self.json_response(202 if created else 200, job)
             return
@@ -990,6 +1255,35 @@ class Handler(BaseHTTPRequestHandler):
             self.error(403, "REQUEST_HEADER_REQUIRED")
             return
         path = urlsplit(self.path).path
+        if path.startswith(PREFIX + "api/management/record-sets/"):
+            document_id = path[len(PREFIX + "api/management/record-sets/"):]
+            if not valid_uuid(document_id):
+                self.error(404, "RECORD_SOURCE_NOT_FOUND")
+                return
+            value = self.get_json(MAX_RECORD_JSON_BYTES)
+            if value is None:
+                return
+            if set(value) != {"source_job_id", "revision", "rows"}:
+                self.error(400, "RECORD_ROWS_INVALID")
+                return
+            try:
+                record, created = self.server.store.save_record_set(
+                    session_id, document_id, value["source_job_id"],
+                    value["revision"], value["rows"])
+            except LookupError:
+                self.error(404, "RECORD_SOURCE_NOT_FOUND")
+                return
+            except ValueError as exc:
+                code = str(exc)
+                conflicts = {"RECORD_VERSION_CONFLICT", "RECORD_SOURCE_CONFLICT",
+                             "RECORD_LINK_NOT_FOUND", "RECORD_LINK_CONFLICT", "RECORD_LINKED_ROW",
+                             "RECORD_ROW_REMOVAL_FORBIDDEN", "RECORD_ROW_ID_CONFLICT"}
+                allowed = conflicts | {"RECORD_VERSION_INVALID", "RECORD_ROWS_INVALID"}
+                self.error(409 if code in conflicts else 400,
+                           code if code in allowed else "RECORD_ROWS_INVALID")
+                return
+            self.json_response(201 if created else 200, record)
+            return
         if not path.startswith(PREFIX + "api/management/drafts/"):
             self.error(HTTPStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
             return
@@ -1035,6 +1329,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _upload_impl(self, session_id: str, purpose: str) -> None:
         start = time.monotonic()
+        document_kind = self.headers.get("X-Document-Kind") if purpose == "management" else None
+        if purpose == "management" and document_kind not in KINDS:
+            self.error(400, "DOCUMENT_KIND_REQUIRED" if document_kind is None else "DOCUMENT_KIND_INVALID")
+            return
         key = self.headers.get("X-Request-Key")
         sha = self.headers.get("X-File-SHA256", "")
         try:
@@ -1081,7 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             doc = self.server.store.add_document(session_id, key, data, calculated,
                                                  int((time.monotonic() - start) * 1000), page_count,
-                                                 purpose)
+                                                 purpose, document_kind)
         except ValueError as exc:
             code = str(exc)
             self.error(507 if code == "STORAGE_LIMIT" else 409,

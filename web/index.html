@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>OrderFlow 物流管理</title>
   <link rel="stylesheet" href="/orderflow/manage.css">
   <script src="/orderflow/manage.js" defer></script>
@@ -10,63 +10,96 @@
 <body>
   <div class="shell">
     <header class="topbar">
-      <a class="brand" href="/orderflow/">OrderFlow <span>物流管理</span></a>
-      <nav aria-label="主要導覽"><a aria-current="page" href="/orderflow/">文件草稿</a><a href="/orderflow/test/">診斷測試</a></nav>
-      <button id="logout" class="quiet" type="button" hidden>登出</button>
-    </header>
-    <main>
-      <section class="hero">
-        <p class="eyebrow">文件辨識工作區</p>
-        <h1>從 PDF 建立可核對的品項草稿</h1>
-        <p>上傳文件、明確啟動 Google AI 辨識，再逐項核對與儲存。這裡的草稿尚不是正式訂單或出貨紀錄。</p>
-      </section>
-      <section id="startup" class="card" role="status">
-        <h2>正在載入</h2><p id="startup-status">正在確認登入及資料狀態。</p><button id="retry" type="button" hidden>重新載入</button>
-      </section>
-      <section id="login" class="card" hidden>
-        <h2>登入網站</h2><p>輸入網站密碼。Google AI Studio 金鑰會在登入後另外設定。</p>
-        <form id="login-form"><label for="password">網站密碼</label><input id="password" name="site-login-password" type="password" autocomplete="current-password" required><button id="login-button">登入</button></form>
-        <p id="login-status" class="status" role="status"></p>
-      </section>
-      <div id="workspace" hidden>
-        <div class="layout">
-          <div class="main-column">
-            <section class="card" aria-labelledby="upload-title">
-              <div class="heading"><span class="number">1</span><h2 id="upload-title">上傳 PDF</h2></div>
-              <p>單檔上限 8 MB。上傳的檔案保存在網站主機，選檔後仍須按上傳。</p>
-              <label for="pdf">選擇 PDF</label><input id="pdf" type="file" accept="application/pdf,.pdf">
-              <button id="upload" type="button">上傳這份 PDF</button><p id="upload-status" class="status" role="status">尚未選檔。</p>
-              <h3>這個登入工作區的文件</h3><div id="documents" class="document-list"></div>
-            </section>
-            <section class="card" aria-labelledby="ai-title">
-              <div class="heading"><span class="number">2</span><h2 id="ai-title">辨識品項</h2></div>
-              <p id="selection">請先上傳或選取文件。</p>
-              <p class="notice"><strong>每次辨識都會將選取的 PDF 傳給 Google，並可能使用 API 額度。</strong>請先確認文件可外傳；AI 品項需人工核對。</p>
-              <button id="recognize" type="button" disabled>送交 Google AI 辨識</button>
-              <p id="job-status" class="status" role="status">尚未啟動。</p>
-              <div id="jobs" class="job-list"></div>
-            </section>
-            <section class="card" aria-labelledby="draft-title">
-              <div class="heading"><span class="number">3</span><h2 id="draft-title">核對並儲存草稿</h2></div>
-              <p id="draft-source">完成真正辨識後，才會在這裡顯示可編修的品項。</p>
-              <div id="rows"></div>
-              <div class="actions"><button id="add-row" type="button" disabled>新增一列</button><button id="save-draft" type="button" disabled>儲存草稿</button></div>
-              <p id="draft-status" class="status" role="status">尚無管理草稿。未儲存的編修在重新整理後會消失。</p>
-            </section>
-          </div>
-          <aside class="side-column">
-            <section class="card" aria-labelledby="key-title">
-              <h2 id="key-title">Google AI 金鑰</h2>
-              <p id="key-help"><strong>Google AI Studio API key 不是網站密碼。</strong>請從 AI Studio 複製金鑰；金鑰僅在網站主機記憶體保存 15 分鐘，重啟後清除。輸入形式通過不代表金鑰有效，權限及額度可到診斷測試頁明確執行文字連線檢查。</p>
-              <label for="ai-key">Google AI Studio API key</label><input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly>
-              <div class="actions"><button id="set-key" type="button">設定金鑰</button><button id="clear-key" class="quiet" type="button">清除</button></div>
-              <p id="key-status" class="status" role="status">尚未設定。</p>
-            </section>
-            <section class="card compact"><h2>其他功能</h2><p>正式訂單、實際出貨、待出貨與實體庫存流程仍在定義，這一版不會由 AI 草稿自動建立紀錄。</p><a href="/orderflow/test/">前往診斷測試頁</a></section>
-          </aside>
-        </div>
+      <a class="brand" href="/orderflow/">物流<span>管理</span><small>AI</small></a>
+      <div class="top-actions">
+        <button id="csv-export" class="button quiet" type="button" hidden>CSV 匯出</button>
+        <a class="button quiet" href="/orderflow/test/">診斷測試</a>
+        <button id="logout" class="button quiet" type="button" hidden>登出</button>
       </div>
+    </header>
+    <main id="startup" class="auth-screen card" role="status">
+      <h1>正在載入</h1><p id="startup-status">正在確認登入及資料狀態。</p>
+      <button id="retry" type="button" hidden>重新載入</button>
     </main>
+    <main id="login" class="auth-screen card" hidden>
+      <h1>登入網站</h1><p>請先使用網站密碼登入。Google AI Studio 金鑰會在登入後另外設定。</p>
+      <form id="login-form"><label for="password">網站密碼</label><input id="password" name="site-login-password" type="password" autocomplete="current-password" required><button id="login-button">登入</button></form>
+      <p id="login-status" class="status" role="status"></p>
+    </main>
+    <div id="workspace" class="app-layout" hidden>
+      <nav class="sidebar" aria-label="工作區導覽">
+        <p class="nav-label">總覽</p>
+        <button class="nav-item active" data-page="dashboard" type="button" aria-current="page">📊 儀表板</button>
+        <p class="nav-label">管理</p>
+        <button class="nav-item" data-page="upload" type="button">📤 PDF 上傳</button>
+        <button class="nav-item" data-page="orders" type="button">📋 訂單</button>
+        <button class="nav-item" data-page="invoices" type="button">🧾 發票紀錄</button>
+        <button class="nav-item" data-page="sales" type="button">💰 發票金額統計</button>
+        <button class="nav-item" data-page="comparison" type="button">📦 訂購／開票對照</button>
+      </nav>
+      <main class="main-content">
+        <section id="page-dashboard" class="page active" aria-labelledby="dashboard-title">
+          <div class="page-heading"><h1 id="dashboard-title">儀表板</h1><span id="last-update" class="muted"></span></div>
+          <div class="metrics">
+            <div class="metric-card"><span>訂單金額</span><strong id="metric-orders">—</strong><small id="metric-orders-count">0 筆</small></div>
+            <div class="metric-card"><span>已開票數量</span><strong id="metric-invoice-qty">—</strong><small id="metric-invoice-count">0 筆</small></div>
+            <div class="metric-card"><span>發票金額</span><strong id="metric-invoices">—</strong><small>按幣別分列</small></div>
+            <div class="metric-card"><span>可對照品項</span><strong id="metric-compared">0</strong><small>不代表實體庫存</small></div>
+          </div>
+          <div class="dashboard-grid">
+            <section class="card table-card"><div class="card-heading"><h2>最近訂單</h2></div><div class="table-scroll"><table><thead><tr><th>客戶</th><th>品名</th><th class="num">金額</th><th>狀態</th></tr></thead><tbody id="recent-orders"><tr><td colspan="4" class="empty">尚無已確認訂單</td></tr></tbody></table></div></section>
+            <section class="card table-card"><div class="card-heading"><h2>最近發票</h2></div><div class="table-scroll"><table><thead><tr><th>客戶</th><th>品名</th><th class="num">數量</th><th class="num">金額</th></tr></thead><tbody id="recent-invoices"><tr><td colspan="4" class="empty">尚無已確認發票</td></tr></tbody></table></div></section>
+          </div>
+          <section class="card table-card"><div class="card-heading"><h2>訂購與開票數量對照</h2><span class="muted">非待出貨或實體庫存</span></div><div class="table-scroll"><table><thead><tr><th>品名／品號</th><th class="num">訂購數量</th><th class="num">已開票數量</th><th class="num">數量差</th><th>對應狀態</th></tr></thead><tbody id="recent-comparison"><tr><td colspan="5" class="empty">尚無可對照資料</td></tr></tbody></table></div></section>
+        </section>
+        <section id="page-upload" class="page" aria-labelledby="upload-page-title" hidden>
+          <div class="page-heading"><h1 id="upload-page-title">PDF 上傳</h1></div>
+          <section class="card" aria-labelledby="key-title"><div class="card-heading"><h2 id="key-title">Google AI 金鑰</h2><span id="key-chip" class="badge">未設定</span></div><div class="card-body">
+            <p id="key-help" class="muted"><strong>Google AI Studio API key 不是網站密碼。</strong>金鑰僅在網站主機記憶體保存 15 分鐘，重啟後清除。輸入形式通過不代表有效；可至診斷測試頁明確執行文字連線檢查。</p>
+            <div class="key-row"><label for="ai-key">API Key</label><input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly><button id="set-key" type="button">套用金鑰</button><button id="clear-key" class="quiet" type="button">清除金鑰</button></div>
+            <p id="key-status" class="status" role="status">尚未設定。</p>
+          </div></section>
+          <section class="card" aria-labelledby="upload-title"><div class="card-heading"><h2 id="upload-title">AI 自動分析</h2><span class="ai-badge">Gemini 3.1 Flash Lite</span></div><div class="card-body">
+            <p>選擇採購單或發票 PDF。單檔上限 8 MB；上傳後仍須明確確認，才會將文件送交 Google 辨識。</p>
+            <div class="upload-grid">
+              <div><h3>採購單 (Purchase Order)</h3><label class="upload-box" for="purchase-pdf" role="button" tabindex="0"><span class="upload-icon">📋</span><strong>採購單 PDF</strong><small>點擊或拖曳上傳</small></label><input id="purchase-pdf" type="file" accept="application/pdf,.pdf" hidden></div>
+              <div><h3>發票 (Invoice)</h3><label class="upload-box" for="invoice-pdf" role="button" tabindex="0"><span class="upload-icon">🧾</span><strong>發票 PDF</strong><small>點擊或拖曳上傳</small></label><input id="invoice-pdf" type="file" accept="application/pdf,.pdf" hidden></div>
+            </div>
+            <div id="processing" class="processing" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="processing-text">正在處理…</span></div>
+            <p id="upload-status" class="status" role="status">尚未選檔。</p>
+            <button id="retry-upload" class="quiet" type="button" hidden>重試同一份上傳</button>
+            <div class="legacy-upload" hidden><label for="pdf">選擇 PDF</label><input id="pdf" type="file" accept="application/pdf,.pdf"><button id="upload" type="button">上傳這份 PDF</button></div>
+            <h3>這個登入工作區的文件</h3><div id="documents" class="document-list"></div>
+          </div></section>
+          <section class="card" aria-labelledby="ai-title"><div class="card-heading"><h2 id="ai-title">辨識品項</h2></div><div class="card-body">
+            <p id="selection">請先上傳或選取文件。</p><p class="notice"><strong>每次辨識都會將選取的 PDF 傳給 Google，並可能使用 API 額度。</strong>請先確認文件可外傳；AI 品項需人工核對。</p>
+            <button id="recognize" type="button" disabled>送交 Google AI 辨識</button><p id="job-status" class="status" role="status">尚未啟動。</p><div id="jobs" class="job-list"></div>
+          </div></section>
+          <section class="card" aria-labelledby="draft-title"><div class="card-heading"><h2 id="draft-title">核對並儲存</h2></div><div class="card-body">
+            <p id="draft-source">完成真正辨識後，才會在這裡顯示可編修的品項。</p><div id="rows"></div>
+            <div class="actions"><button id="add-row" type="button" disabled>新增一列</button><button id="save-draft" type="button" disabled>儲存草稿</button></div>
+            <p id="draft-status" class="status" role="status">尚無管理草稿。未儲存的編修在重新整理後會消失。</p>
+          </div></section>
+        </section>
+        <section id="page-orders" class="page" aria-labelledby="orders-title" hidden>
+          <div class="page-heading"><h1 id="orders-title">訂單管理</h1></div>
+          <section class="card table-card"><div class="card-heading filters"><input id="order-search" type="search" placeholder="客戶／品名搜尋" aria-label="搜尋訂單客戶或品名"><select id="order-status-filter" aria-label="篩選訂單狀態"><option value="">全部狀態</option><option value="pending">待確認</option><option value="confirmed">已確認</option></select><span id="order-count" class="count">0 筆</span></div><div class="table-scroll"><table><thead><tr><th>採購單號</th><th>客戶</th><th>品名</th><th>品號</th><th class="num">數量</th><th class="num">金額</th><th>幣別</th><th>日期</th><th>狀態</th><th>操作</th></tr></thead><tbody id="order-rows"><tr><td colspan="10" class="empty">尚無已確認訂單</td></tr></tbody></table></div></section>
+        </section>
+        <section id="page-invoices" class="page" aria-labelledby="invoices-title" hidden>
+          <div class="page-heading"><h1 id="invoices-title">發票紀錄</h1></div><p class="page-note">發票尚未確認實際出貨；上傳或儲存發票不建立出貨紀錄，也不扣實體庫存。</p>
+          <section class="card table-card"><div class="card-heading filters"><input id="invoice-search" type="search" placeholder="客戶／品名搜尋" aria-label="搜尋發票客戶或品名"><span id="invoice-count" class="count">0 筆</span></div><div class="table-scroll"><table><thead><tr><th>發票號碼</th><th>客戶</th><th>品名</th><th>品號</th><th class="num">數量</th><th class="num">單價</th><th class="num">金額</th><th>幣別</th><th>日期</th><th>操作</th></tr></thead><tbody id="invoice-rows"><tr><td colspan="10" class="empty">尚無已確認發票</td></tr></tbody></table></div></section>
+        </section>
+        <section id="page-sales" class="page" aria-labelledby="sales-title" hidden>
+          <div class="page-heading"><h1 id="sales-title">發票金額統計</h1></div><p class="page-note">依發票日期與幣別統計已確認金額；不代表已收款或收入認列。</p>
+          <section class="card table-card"><div class="card-heading filters"><select id="sales-period" aria-label="發票期間"><option value="all">全部期間</option><option value="month">本月</option><option value="quarter">本季</option></select><input id="sales-search" type="search" placeholder="客戶搜尋" aria-label="搜尋發票客戶"></div><div class="table-scroll"><table><thead><tr><th>日期</th><th>發票號碼</th><th>客戶</th><th>品名</th><th class="num">數量</th><th class="num">發票金額</th><th>幣別</th></tr></thead><tbody id="sales-rows"><tr><td colspan="7" class="empty">無符合資料</td></tr></tbody></table></div><div id="sales-total" class="table-total">合計：—</div></section>
+        </section>
+        <section id="page-comparison" class="page" aria-labelledby="comparison-title" hidden>
+          <div class="page-heading"><h1 id="comparison-title">訂購與開票數量對照</h1></div><p class="page-note">僅對照已明確關聯的訂單與發票品項；數量差不是待出貨、可用庫存或缺貨判定。未能對應的品項需人工核對。</p>
+          <section class="card table-card"><div class="table-scroll"><table><thead><tr><th>品名</th><th>品號</th><th class="num">訂購數量</th><th class="num">已開票數量</th><th class="num">數量差</th><th>對應狀態</th></tr></thead><tbody id="comparison-rows"><tr><td colspan="6" class="empty">尚無可對照資料</td></tr></tbody></table></div></section>
+        </section>
+      </main>
+    </div>
   </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

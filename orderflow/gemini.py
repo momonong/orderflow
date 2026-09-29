@@ -16,6 +16,11 @@ ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:gen
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_ERROR_BYTES = 4096
 SAFE_400_REASONS = {"INVALID_ARGUMENT", "FAILED_PRECONDITION"}
+MANAGEMENT_FIELDS = ("orderNo", "invoiceNo", "client", "product", "code", "qty",
+                     "unitPrice", "amount", "currency", "date", "incoterms", "unit")
+MANAGEMENT_SCHEMA = {"type": "OBJECT", "properties": {"items": {"type": "ARRAY", "items": {
+    "type": "OBJECT", "properties": {field: {"type": "STRING"} for field in MANAGEMENT_FIELDS}
+}}}, "required": ["items"]}
 ITEM_SCHEMA = {
     "type": "OBJECT",
     "properties": {"items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
@@ -48,10 +53,11 @@ def _safe_400_reason(error: urllib.error.HTTPError) -> str:
         return "UNCLASSIFIED"
 
 
-def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool) -> str:
+def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool,
+              schema: dict | None = None) -> str:
     body: dict = {"contents": [{"role": "user", "parts": parts}]}
     if structured:
-        body["generationConfig"] = {"responseMimeType": "application/json", "responseSchema": ITEM_SCHEMA}
+        body["generationConfig"] = {"responseMimeType": "application/json", "responseSchema": schema or ITEM_SCHEMA}
     request = urllib.request.Request(
         ENDPOINT, data=json.dumps(body, separators=(",", ":")).encode(),
         headers={"Content-Type": "application/json", "x-goog-api-key": key}, method="POST",
@@ -85,8 +91,9 @@ def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool) 
 
 
 class GeminiAdapter:
-    def __init__(self, key: str):
+    def __init__(self, key: str, document_kind: str | None = None):
         self._key = key
+        self.document_kind = document_kind
 
     def check_text(self) -> None:
         text = _generate(self._key, [{"text": "Reply with one short word: OK"}], timeout=12, structured=False)
@@ -95,10 +102,27 @@ class GeminiAdapter:
 
     def recognize(self, pdf_path: str, *, deadline_seconds: float) -> object:
         data = Path(pdf_path).read_bytes()
+        if self.document_kind in {"purchase_order", "invoice"}:
+            role = ("This is a purchase order. Find the buyer only if the document clearly identifies it."
+                    if self.document_kind == "purchase_order" else
+                    "This is an invoice. Find the billed customer only if the document clearly identifies it; "
+                    "a Company label may identify the issuer instead.")
+            prompt = (role + " Extract every line item into items with orderNo or invoiceNo, client, "
+                      "product, code, qty, unitPrice, amount, currency, date, incoterms and unit. "
+                      "Keep product spelling, special characters and internal whitespace. "
+                      "Use decimal strings for quantities and money. Omit any field not supported "
+                      "by the PDF; never infer customer, currency, date, zero, unit or shipment. "
+                      "Reply in JSON only. Use an empty items array when no items are visible.")
+            schema = MANAGEMENT_SCHEMA
+        else:
+            prompt = ("Extract line items from this PDF. Return an items array with each item's "
+                      "description and nonnegative integer quantity. Do not invent missing items; "
+                      "use an empty array if none are visible. Reply in JSON only.")
+            schema = ITEM_SCHEMA
         text = _generate(self._key, [
-            {"text": "Extract line items from this PDF. Return an items array with each item's description and nonnegative integer quantity. Do not invent missing items; use an empty array if none are visible. Reply in JSON only."},
+            {"text": prompt},
             {"inline_data": {"mime_type": "application/pdf", "data": base64.b64encode(data).decode("ascii")}},
-        ], timeout=deadline_seconds, structured=True)
+        ], timeout=deadline_seconds, structured=True, schema=schema)
         try:
             return json.loads(text)
         except (UnicodeError, json.JSONDecodeError):
