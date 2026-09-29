@@ -159,7 +159,15 @@ function safeCode(error, fallback) {
   const code = error?.code || fallback;
   return /^[A-Z0-9_]{2,40}$/.test(code) ? code : fallback;
 }
+function responseTypeHint(value) {
+  const type = (value || "").split(";", 1)[0].trim().toLowerCase();
+  if (type === "application/json" || type.endsWith("+json")) return "JSON";
+  if (type === "text/html") return "HTML";
+  if (type === "text/plain") return "TEXT";
+  return type ? "OTHER" : "MISSING";
+}
 async function api(path, options = {}, timeoutMs = 5000) {
+  const started = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -170,7 +178,8 @@ async function api(path, options = {}, timeoutMs = 5000) {
     });
     let data;
     try { data = await response.json(); }
-    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status}; }
+    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status,
+                   responseType: responseTypeHint(response.headers.get("Content-Type"))}; }
     if (!response.ok) {
       if (response.status === 401 && path !== "login" && path !== "logout") {
         showLogin(data.error_code === "SESSION_EXPIRED" ? "登入已過期，請重新輸入網站密碼。" : undefined);
@@ -179,9 +188,10 @@ async function api(path, options = {}, timeoutMs = 5000) {
     }
     return {data, status: response.status};
   } catch (error) {
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true};
-    if (error?.code) throw error;
-    throw {code: "NETWORK_ERROR", unknown: true};
+    const ms = Math.round(performance.now() - started);
+    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true, ms};
+    if (error?.code) throw {...error, ms};
+    throw {code: "NETWORK_ERROR", unknown: true, ms};
   } finally { clearTimeout(timer); }
 }
 function renderRows(tbody, rows) {
@@ -214,6 +224,7 @@ function updateReport() {
     const extras = [];
     if (entry.ms !== undefined) extras.push(`${entry.ms} ms`);
     if (entry.http !== undefined) extras.push(`HTTP ${entry.http}`);
+    if (entry.responseType) extras.push(`回應類型 ${entry.responseType}`);
     if (entry.code) extras.push(entry.code);
     lines.push(`- ${titles[name]}：${labels[entry.status]}${extras.length ? "（" + extras.join("，") + "）" : ""}`);
   }
@@ -453,8 +464,10 @@ async function checkKey() {
     setStatus("check-status", "文字連線成功；這還不能證明 PDF 辨識成功。", "pass");
   } catch (error) {
     if (error.code === "KEY_REQUIRED") aiKeyConfigured = false;
-    const uncertain = error.unknown || ["AI_HTTP_UNKNOWN", "AI_TIMEOUT_UNKNOWN"].includes(error.code);
-    mark("text_check", uncertain ? "unknown" : "fail", {code: safeCode(error, "AI_HTTP_UNKNOWN")});
+    const uncertain = error.unknown || ["AI_HTTP_UNKNOWN", "AI_TIMEOUT_UNKNOWN",
+      "BAD_JSON_RESPONSE", "HTTP_ERROR"].includes(error.code);
+    mark("text_check", uncertain ? "unknown" : "fail", {code: safeCode(error, "AI_HTTP_UNKNOWN"),
+      http: error.status, ms: error.ms, responseType: error.responseType});
     setStatus("check-status", keyAdvice(safeCode(error, "AI_HTTP_UNKNOWN")), uncertain ? "unknown" : "fail");
   } finally { keyBusy = false; updateRealControls(); }
 }
@@ -519,7 +532,51 @@ async function copyReport() {
     setStatus("copy-status", "無法自動複製。請手動複製：下方報告已選取，按 Ctrl+C（Mac 用 Cmd+C），再貼給提供連結的人。", "fail");
   }
 }
+function showStartupFailure(error) {
+  $("login-section").hidden = true;
+  $("workspace").hidden = true;
+  $("startup-section").hidden = false;
+  $("startup-title").textContent = "暫時無法顯示網站內容";
+  $("startup-message").textContent = "目前無法確認網站登入狀態。請按「重新檢查網站」；若仍無法顯示，請回報提供連結的人。你不需要在這裡重新輸入密碼或金鑰。";
+  $("startup-retry").hidden = false;
+  mark("api", error?.unknown ? "unknown" : "fail", {code: safeCode(error, "BOOTSTRAP_FAILED"), http: error?.status});
+}
+async function loadBootstrap() {
+  $("startup-section").hidden = false;
+  $("startup-title").textContent = "正在確認網站狀態";
+  $("startup-message").textContent = "正在載入登入或測試畫面。若一直停在這裡，可能是網站程式未載入或連線中斷；請重新整理，仍無法顯示時回報提供連結的人。";
+  $("startup-retry").hidden = true;
+  try {
+    const response = await api("bootstrap");
+
+    version = response.data.version;
+    maxBytes = response.data.max_pdf_bytes;
+    documents = response.data.documents;
+    jobs = response.data.jobs;
+    aiKeyConfigured = !!response.data.ai_key_configured;
+    setStatus("key-status", aiKeyConfigured
+      ? "金鑰仍暫存在此服務的記憶體；到期或重新啟動後需重新輸入。"
+      : "尚未設定金鑰；仍可使用上方模擬測試。", aiKeyConfigured ? "pass" : "");
+    updateRealControls();
+    mark("query", "pass", {http: response.status});
+    renderDocuments();
+    if (documents.length) {
+      selectDocument(documents[0]);
+      setStatus("basic-status", "已找回先前的上傳紀錄；若要測新檔案，請先按「檢查連線」。");
+    }
+    $("login-section").hidden = true;
+    $("workspace").hidden = false;
+    $("startup-section").hidden = true;
+  } catch (error) {
+    if (error?.status === 401 && error.code !== "BAD_JSON_RESPONSE") {
+      $("startup-section").hidden = true;
+      return;
+    }
+    showStartupFailure(error);
+  }
+}
 async function initialize() {
+
   $("login-form").addEventListener("submit", login);
   $("logout-button").addEventListener("click", logout);
   updateReport();
@@ -537,31 +594,14 @@ async function initialize() {
   $("real-button").addEventListener("click", runReal);
   updateUploadChoice();
   updateRealControls();
-  try {
-    const response = await api("bootstrap");
-    $("login-section").hidden = true;
-    $("workspace").hidden = false;
-    version = response.data.version;
-    maxBytes = response.data.max_pdf_bytes;
-    documents = response.data.documents;
-    jobs = response.data.jobs;
-    aiKeyConfigured = !!response.data.ai_key_configured;
-    setStatus("key-status", aiKeyConfigured
-      ? "金鑰仍暫存在此服務的記憶體；到期或重新啟動後需重新輸入。"
-      : "尚未設定金鑰；仍可使用上方模擬測試。", aiKeyConfigured ? "pass" : "");
-    updateRealControls();
-    mark("query", "pass", {http: response.status});
-    renderDocuments();
-    if (documents.length) {
-      selectDocument(documents[0]);
-      setStatus("basic-status", "已找回先前的上傳紀錄；若要測新檔案，請先按「檢查連線」。");
-    }
-  } catch (error) {
-    if (error.status === 401) return;
-    mark("api", error.unknown ? "unknown" : "fail", {code: safeCode(error, "BOOTSTRAP_FAILED")});
-    setStatus("basic-status", "現在無法連上網站服務。請稍後重新整理；若仍失敗，請複製報告傳回提供連結的人。", "fail");
-    nextStep("目前無法連線。稍後重新整理，或到步驟 4 複製報告。");
-    reportReady();
-  }
+  $("startup-retry").addEventListener("click", loadBootstrap);
+  await loadBootstrap();
 }
-initialize();
+initialize().catch(() => {
+  $("startup-section").hidden = false;
+  $("startup-title").textContent = "暫時無法顯示網站內容";
+  $("startup-message").textContent = "網站畫面未能完成載入。請重新整理頁面；若仍無法顯示，請回報提供連結的人。";
+  $("startup-retry").hidden = true;
+  $("login-section").hidden = true;
+  $("workspace").hidden = true;
+});

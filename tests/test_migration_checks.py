@@ -1,5 +1,7 @@
 """Migration checks must preserve real Store relations and PDF bytes."""
 import hashlib
+import io
+import os
 import runpy
 import sys
 import stat
@@ -7,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+import tarfile
 import unittest
 import uuid
 
@@ -17,6 +20,35 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_upgrade_release_restores_tarfile_directory_access(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        make_readable = runpy.run_path(str(deploy_dir / "upgrade-asus-release.py"))["make_release_readable"]
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+            directory = tarfile.TarInfo("orderflow")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            archive.addfile(directory)
+            source = tarfile.TarInfo("orderflow/gemini.py")
+            source.mode = 0o644
+            source.size = 6
+            archive.addfile(source, io.BytesIO(b"source"))
+        with tempfile.TemporaryDirectory() as root:
+            stage = Path(root) / "release"
+            stage.mkdir()
+            archive_bytes.seek(0)
+            previous_umask = os.umask(0o077)
+            try:
+                with tarfile.open(fileobj=archive_bytes, mode="r:") as archive:
+                    archive.extractall(stage, filter="data")
+            finally:
+                os.umask(previous_umask)
+            package = stage / "orderflow"
+            self.assertEqual(stat.S_IMODE(package.stat().st_mode), 0o700)
+            make_readable(stage)
+            self.assertEqual(stat.S_IMODE(package.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE((package / "gemini.py").stat().st_mode), 0o644)
+
     def test_copied_private_stage_is_traversable_by_service_account(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
         sys.path.insert(0, str(deploy_dir))

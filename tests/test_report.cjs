@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync('web/app.js', 'utf8').replace(/\ninitialize\(\);\s*$/, '\n');
+const source = fs.readFileSync('web/app.js', 'utf8').split('\ninitialize().catch(')[0];
 
 async function check(clipboard) {
   const report = {value: '', focused: false, selected: false, focus() {this.focused = true;}, select() {this.selected = true;}};
