@@ -2,7 +2,8 @@
 const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
 const state = {documents: [], jobs: [], drafts: [], recordSets: [], key: false, selected: null,
-  job: null, rows: [], recordIssues: [], revision: 0, dirty: false, busy: false, uploadKey: null,
+  job: null, rows: [], recordIssues: [], revision: 0, editSerial: 0,
+  dirty: false, busy: false, uploadKey: null,
   uploadFile: null, pendingFile: null, pendingKind: null, pendingRecordEdit: null,
   pendingJobKeys: new Map(), page: "dashboard"};
 let keyFieldUsed = false;
@@ -165,7 +166,8 @@ function renderDocuments() {
     button.setAttribute("aria-pressed", String(doc.id === state.selected));
     const label = doc.document_kind === "purchase_order" ? "採購單" : doc.document_kind === "invoice" ? "發票" : "未分類舊草稿";
     button.textContent = `${label} ${state.documents.length - index} · ${doc.page_count || "?"} 頁 · ${Math.ceil(doc.size / 1024)} KB · ${new Date(doc.created_ms).toLocaleString()}`;
-    button.addEventListener("click", () => { state.selected = doc.id; state.job = null; renderDocuments(); renderJobs();
+    button.addEventListener("click", () => { if (state.busy) return;
+      state.selected = doc.id; state.job = null; renderDocuments(); renderJobs();
       const saved = state.recordSets.find(item => item.document_id === doc.id);
       const latest = state.jobs.find(job => job.id === saved?.source_job_id)
         || state.jobs.find(job => job.document_id === doc.id);
@@ -214,7 +216,8 @@ function editRows(rows) {
   });
   refreshControls();
 }
-function markDirty() { state.dirty = true; status("draft-status", "有未儲存的編修；重新整理後會消失。", "unknown"); refreshControls(); }
+function markDirty() { state.editSerial++; state.dirty = true;
+  status("draft-status", "有未儲存的編修；重新整理後會消失。", "unknown"); refreshControls(); }
 function selectJob(id) {
   const job = state.jobs.find(item => item.id === id && item.document_id === state.selected);
   if (!job) { clearDraft(); return; }
@@ -786,6 +789,7 @@ async function saveRecordSet() {
     return;
   }
   state.recordIssues = []; renderRecordIssues([]);
+  const submittedSerial = state.editSerial;
   state.busy = true; refreshControls(); status("draft-status", "正在保存人工確認的記錄…");
   try {
     const record = await api(`management/record-sets/${state.selected}`, {
@@ -793,7 +797,13 @@ async function saveRecordSet() {
       body: JSON.stringify({source_job_id: state.job.id, revision: state.revision, rows: checked.rows}),
     });
     state.recordSets = [record, ...state.recordSets.filter(item => item.document_id !== record.document_id)];
-    state.revision = record.revision; state.rows = record.rows.map(row => ({...row})); state.dirty = false;
+    state.revision = record.revision;
+    if (state.editSerial !== submittedSerial) {
+      state.dirty = true; renderManagementViews();
+      status("draft-status", `已保存送出時的修訂 ${record.revision}；送出後的新編修仍在欄位中，請再核對並保存。`, "unknown");
+      return;
+    }
+    state.rows = record.rows.map(row => ({...row})); state.dirty = false;
     editRecordRows(); renderManagementViews();
     status("draft-status", `已保存修訂 ${record.revision}；原 PDF 與辨識結果仍保留。`, "good");
     showPage(record.kind === "purchase_order" ? "orders" : "invoices");

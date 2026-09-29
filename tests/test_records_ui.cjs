@@ -192,6 +192,24 @@ context.api = async (path, options) => {
   assert.equal(vm.runInContext('state.rows[0].date', context), '2024-02-29');
   assert.equal(vm.runInContext('state.rows[1].date', context), '2026-09-22');
   assert.equal(vm.runInContext('state.recordIssues.length', context), 0);
+  vm.runInContext('showPage("upload"); state.rows[0].amount="22.50"; markDirty()', context);
+  let resolveSave;
+  context.api = async (path, options) => new Promise(resolve => {
+    const body = JSON.parse(options.body);
+    resolveSave = () => resolve({document_id:orderId, source_job_id:jobId,
+      kind:'purchase_order', rows:body.rows, revision:3});
+  });
+  const pendingSave = vm.runInContext('saveRecordSet()', context);
+  el('documents').children[1].listeners.click();
+  assert.equal(vm.runInContext('state.selected', context), orderId,
+    'document selection stays fixed while a save is in flight');
+  vm.runInContext('state.rows[0].product="edited after submit"; markDirty()', context);
+  resolveSave(); await pendingSave;
+  assert.equal(vm.runInContext('state.rows[0].product', context), 'edited after submit');
+  assert.equal(vm.runInContext('state.revision', context), 3);
+  assert.equal(vm.runInContext('state.dirty', context), true);
+  assert.match(el('draft-status').textContent, /新編修仍在欄位中/);
+  assert.equal(vm.runInContext('state.page', context), 'upload');
   vm.runInContext('state.rows[0].date="2026/9/22"; state.dirty=true; editRecordRows()', context);
   context.api = realApi;
   context.fetch = async () => ({status:401, ok:false, headers:{get(name) {
@@ -203,7 +221,7 @@ context.api = async (path, options) => {
   assert.equal(vm.runInContext('state.rows[0].date', context), '2026/9/22');
   vm.runInContext('showWorkspace(snapshot)', context);
   assert.equal(vm.runInContext('state.rows[0].date', context), '2026/9/22');
-  assert.equal(vm.runInContext('state.revision', context), 2);
+  assert.equal(vm.runInContext('state.revision', context), 3);
   assert.equal(vm.runInContext('state.dirty', context), true);
   assert.equal(vm.runInContext('state.pendingRecordEdit', context), null);
   console.log('six-page records, date validation, field errors, reauth preserved edits and CSV: ok');
