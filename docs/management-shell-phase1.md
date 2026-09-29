@@ -19,6 +19,6 @@
 
 ## 升級與回復
 
-ASUS 使用 `deploy/upgrade-asus-management.py`。它核對原 runtime commit、待處理工作、archive SHA、依賴與 unit 未變，先在新 release 執行測試；停止服務後保存原始 SQLite/WAL/PDF 和一致性 SQLite snapshot，再切換。切換後檢查管理首頁及匿名 API 401。**一旦產生管理文件或草稿，不可把指標盲目退回不懂用途隔離的舊 runtime**；失敗時保留新資料並以修正版本前進，或另做經審核的資料回復。升級腳本對這種情況拒絕自動回切。以合成資料實測：舊 `eb2f928` runtime 在新 schema 但尚無管理寫入時可讀原本 1 份診斷文件；新增 1 份管理文件後，它會把 2 份都當成診斷文件顯示。因此回切閘門是必要的，並非僅為保守假設。正式資料備份、磁碟與服務資源仍按 ASUS 現有作業約束管理。
+ASUS 使用 `deploy/upgrade-asus-management.py`。它核對原 runtime commit、待處理工作、archive SHA、依賴與 unit 未變，先在新 release 執行測試；停止服務後保存原始 SQLite/WAL/PDF 和一致性 SQLite snapshot，再切換。切換後檢查管理首頁及匿名 API 401。**一旦產生管理文件或草稿，不可把指標盲目退回不懂用途隔離的舊 runtime**；失敗時先停止新程式、等待退出，再查詢是否有管理寫入。已有管理寫入便保留新 `current`、新 DB/PDF 與備份，服務維持停止且輸出 `HARD STOP`，需人工修復版本前進；不啟動舊版，也不還原舊 snapshot 抹除新資料。沒有管理寫入時仍使用同一份 live DB/PDF 回切，保留切換後新增的診斷 session、文件與工作。以合成資料實測：舊 `eb2f928` runtime 在新 schema 但尚無管理寫入時可讀原本 1 份診斷文件；新增 1 份管理文件後，它會把 2 份都當成診斷文件顯示。因此回切閘門是必要的，並非僅為保守假設。正式資料備份、磁碟與服務資源仍按 ASUS 現有作業約束管理。
 
 工程測試使用合成 PDF 與可控 Gemini adapter，不構成真實 Google API、公司 Edge、真實訂單品質或人工驗收證據。

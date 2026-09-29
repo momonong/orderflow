@@ -138,6 +138,20 @@ def replace_current(commit: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def recover_previous_release(switched: bool) -> None:
+    # Stop and wait for the new process to exit before inspecting persistent writes.
+    # The preflight pending-job check cannot close the post-switch race.
+    run("systemctl", "stop", "orderflow", phase="rollback-stop-service")
+    if switched:
+        require(not management_writes_exist(),
+                "management writes exist; old runtime rollback would expose them; fix forward")
+        replace_current(OLD_COMMIT)
+    # No backup restore: diagnostic sessions/documents/jobs written after switch
+    # remain in the same live state and are readable by the old runtime.
+    run("systemctl", "start", "orderflow", phase="rollback-start-service")
+    wait_app(expect_management=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
@@ -248,13 +262,7 @@ def main() -> None:
         recovered = not stopped
         if stopped:
             try:
-                run("systemctl", "stop", "orderflow", phase="rollback-stop-service")
-                if switched:
-                    require(not management_writes_exist(),
-                            "management writes exist; old runtime rollback would expose them; fix forward")
-                    replace_current(OLD_COMMIT)
-                run("systemctl", "start", "orderflow", phase="rollback-start-service")
-                wait_app(expect_management=False)
+                recover_previous_release(switched)
                 recovered = True
                 print("Upgrade failed; previous release restarted; state and backup retained", file=sys.stderr)
             except Exception:

@@ -21,6 +21,50 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_rollback_stops_before_write_check_and_keeps_all_live_rows(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        recover = runpy.run_path(str(deploy_dir / "upgrade-asus-management.py"))["recover_previous_release"]
+        digest = hashlib.sha256(PDF).hexdigest()
+        for management_write in (False, True):
+            with self.subTest(management_write=management_write), tempfile.TemporaryDirectory() as root:
+                state = Path(root)
+                store = Store(state)
+                owner, _, _ = store.authenticate(None)
+                first = store.add_document(owner, str(uuid.uuid4()), PDF, digest, 1, 1)
+                store.add_job(owner, first["id"], str(uuid.uuid4()), "success")
+                events = []
+                def fake_run(*command, phase, cwd=None):
+                    events.append(phase)
+                    if phase == "rollback-stop-service":
+                        # A write finished after the preflight check but before stop returned.
+                        purpose = "management" if management_write else "diagnostic"
+                        session = owner if management_write else store.authenticate(None)[0]
+                        doc = store.add_document(session, str(uuid.uuid4()), PDF, digest, 1, 1, purpose)
+                        if not management_write:
+                            store.add_job(session, doc["id"], str(uuid.uuid4()), "success")
+                def fake_replace(commit): events.append("replace-current")
+                def fake_wait(expect_management): events.append("old-health")
+                with patch.dict(recover.__globals__, {"STATE": state, "run": fake_run,
+                                                      "replace_current": fake_replace,
+                                                      "wait_app": fake_wait}):
+                    if management_write:
+                        with self.assertRaisesRegex(RuntimeError, "management writes exist"):
+                            recover(True)
+                    else:
+                        recover(True)
+                if management_write:
+                    self.assertEqual(events, ["rollback-stop-service"])
+                    self.assertEqual(len(store.documents(owner, "management")), 1)
+                    self.assertEqual(len(store.documents(owner)), 1)
+                else:
+                    self.assertEqual(events, ["rollback-stop-service", "replace-current",
+                                              "rollback-start-service", "old-health"])
+                    with store.db() as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 2)
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
+                    self.assertEqual(len(list((state / "files").glob("*.pdf"))), 2)
+
     def test_management_upgrade_health_checks_new_and_old_runtime(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
         wait_app = runpy.run_path(str(deploy_dir / "upgrade-asus-management.py"))["wait_app"]
