@@ -73,7 +73,14 @@
           </div></section>
           <section class="card" aria-labelledby="ai-title"><div class="card-heading"><h2 id="ai-title">辨識品項</h2></div><div class="card-body">
             <p id="selection">請先上傳或選取文件。</p><p class="notice"><strong>每次辨識都會將選取的 PDF 傳給 Google，並可能使用 API 額度。</strong>請先確認文件可外傳；AI 品項需人工核對。</p>
-            <button id="recognize" type="button" disabled>送交 Google AI 辨識</button><p id="job-status" class="status" role="status">尚未啟動。</p><div id="jobs" class="job-list"></div>
+            <button id="recognize" type="button" disabled>送交 Google AI 辨識</button><p id="job-status" class="status" role="status">尚未啟動。</p>
+            <div id="job-error-tools" class="job-error-tools" hidden>
+              <label for="job-error-details">此筆辨識錯誤資訊（UTC；不含文件或金鑰）</label>
+              <textarea id="job-error-details" readonly rows="10" spellcheck="false"></textarea>
+              <button id="copy-job-error" class="quiet" type="button">複製此筆錯誤資訊</button>
+              <p id="job-error-copy-status" class="status" role="status" aria-live="polite"></p>
+            </div>
+            <div id="jobs" class="job-list"></div>
           </div></section>
           <section class="card" aria-labelledby="draft-title"><div class="card-heading"><h2 id="draft-title">核對並儲存</h2></div><div class="card-body">
             <p id="draft-source">完成真正辨識後，才會在這裡顯示可編修的品項。</p><div id="record-errors" class="record-errors" role="alert" tabindex="-1" hidden></div><div id="rows"></div>
