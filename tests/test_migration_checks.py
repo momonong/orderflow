@@ -42,9 +42,11 @@ class MigrationChecksTests(unittest.TestCase):
                         doc = store.add_document(session, str(uuid.uuid4()), PDF, digest, 1, 1, purpose)
                         if not management_write:
                             store.add_job(session, doc["id"], str(uuid.uuid4()), "success")
+                def fake_quiesce(): events.append("quiescent")
                 def fake_replace(commit): events.append("replace-current")
                 def fake_wait(expect_management): events.append("old-health")
                 with patch.dict(recover.__globals__, {"STATE": state, "run": fake_run,
+                                                      "require_quiescent": fake_quiesce,
                                                       "replace_current": fake_replace,
                                                       "wait_app": fake_wait}):
                     if management_write:
@@ -53,17 +55,34 @@ class MigrationChecksTests(unittest.TestCase):
                     else:
                         recover(True)
                 if management_write:
-                    self.assertEqual(events, ["rollback-stop-service"])
+                    self.assertEqual(events, ["rollback-stop-service", "quiescent"])
                     self.assertEqual(len(store.documents(owner, "management")), 1)
                     self.assertEqual(len(store.documents(owner)), 1)
                 else:
-                    self.assertEqual(events, ["rollback-stop-service", "replace-current",
+                    self.assertEqual(events, ["rollback-stop-service", "quiescent", "replace-current",
                                               "rollback-start-service", "old-health"])
                     with store.db() as db:
                         self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 2)
                         self.assertEqual(db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
                         self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
                     self.assertEqual(len(list((state / "files").glob("*.pdf"))), 2)
+
+    def test_quiescence_rejects_other_service_account_process(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        check = runpy.run_path(str(deploy_dir / "upgrade-asus-management.py"))["require_quiescent"]
+        class Process:
+            name = "123"
+            def __init__(self, uid): self.uid = uid
+            def stat(self): return type("Stat", (), {"st_uid": self.uid})()
+        class ProcRoot:
+            def __init__(self, processes): self.processes = processes
+            def iterdir(self): return self.processes
+        account = type("Pwd", (), {"getpwnam": staticmethod(lambda name: type("Account", (), {"pw_uid": 456})())})()
+        with patch.dict(check.__globals__, {"pwd": account, "Path": lambda path: ProcRoot([Process(789)])}):
+            check()
+        with patch.dict(check.__globals__, {"pwd": account, "Path": lambda path: ProcRoot([Process(456)])}):
+            with self.assertRaisesRegex(RuntimeError, "still has a process"):
+                check()
 
     def test_management_upgrade_health_checks_new_and_old_runtime(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"

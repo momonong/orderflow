@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import shutil
@@ -98,6 +99,19 @@ def wait_app(expect_management: bool = True) -> None:
     raise RuntimeError("protected ASUS app did not become ready")
 
 
+def require_quiescent() -> None:
+    # The managed service must be stopped and no separate process under its
+    # dedicated account may still write the private StateDirectory.
+    account_uid = pwd.getpwnam("orderflow").pw_uid
+    for process in Path("/proc").iterdir():
+        if process.name.isdecimal():
+            try:
+                if process.stat().st_uid == account_uid:
+                    raise RuntimeError("orderflow account still has a process; stop and review writers")
+            except FileNotFoundError:
+                continue
+
+
 def management_writes_exist() -> bool:
     db = sqlite3.connect(f"file:{STATE / 'orderflow.sqlite3'}?mode=ro", uri=True)
     try:
@@ -142,6 +156,7 @@ def recover_previous_release(switched: bool) -> None:
     # Stop and wait for the new process to exit before inspecting persistent writes.
     # The preflight pending-job check cannot close the post-switch race.
     run("systemctl", "stop", "orderflow", phase="rollback-stop-service")
+    require_quiescent()
     if switched:
         require(not management_writes_exist(),
                 "management writes exist; old runtime rollback would expose them; fix forward")
@@ -220,6 +235,7 @@ def main() -> None:
         require(pending_jobs() == 0, "queued/running work appeared; upgrade stopped")
         stopped = True
         run("systemctl", "stop", "orderflow", phase="stop-service")
+        require_quiescent()
         require(pending_jobs() == 0, "queued/running work after stop; old app must be reviewed")
         require(not backup.exists(), "backup destination already exists")
         backup.mkdir(parents=True, mode=0o700)
