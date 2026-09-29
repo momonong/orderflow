@@ -199,10 +199,14 @@ context.api = async (path, options) => {
     resolveSave = () => resolve({document_id:orderId, source_job_id:jobId,
       kind:'purchase_order', rows:body.rows, revision:3});
   });
+  vm.runInContext(`state.jobs.push({...state.jobs[0], id:"70000000-0000-4000-8000-000000000001"}); renderJobs()`, context);
   const pendingSave = vm.runInContext('saveRecordSet()', context);
   el('documents').children[1].listeners.click();
   assert.equal(vm.runInContext('state.selected', context), orderId,
     'document selection stays fixed while a save is in flight');
+  el('jobs').children[1].listeners.click();
+  assert.equal(vm.runInContext('state.job.id', context), jobId,
+    'another recognition job cannot replace the editor during an in-flight save');
   vm.runInContext('state.rows[0].product="edited after submit"; markDirty()', context);
   resolveSave(); await pendingSave;
   assert.equal(vm.runInContext('state.rows[0].product', context), 'edited after submit');

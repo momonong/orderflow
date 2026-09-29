@@ -186,7 +186,8 @@ function renderJobs() {
     const button = document.createElement("button"); button.type = "button"; button.className = "list-button";
     button.setAttribute("aria-pressed", String(job.id === state.job?.id));
     button.textContent = `辨識 ${relevant.length - index} · ${job.state}${job.error_code ? ` · ${job.error_code}` : ""} · ${new Date(job.created_ms).toLocaleString()}`;
-    button.addEventListener("click", () => selectJob(job.id)); target.append(button);
+    button.addEventListener("click", () => { if (!state.busy) selectJob(job.id); });
+    target.append(button);
   });
 }
 function clearDraft() {
