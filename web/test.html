@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderFlow 測試頁</title>
+  <link rel="stylesheet" href="/orderflow/style.css">
+  <script src="/orderflow/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <nav><a href="/orderflow/">返回管理首頁</a></nav>
+    <header>
+      <p class="eyebrow">OrderFlow · 示範測試</p>
+      <h1>試試 PDF 能否上傳並顯示結果</h1>
+      <p>照下面 4 個步驟操作，就能知道測試走到哪裡。<strong>模擬測試使用固定範例；真正辨識需另外設定金鑰，並確認把 PDF 送給 Google。</strong></p>
+    </header>
+    <section id="startup-section" aria-labelledby="startup-title" role="status">
+      <h2 id="startup-title">正在確認網站狀態</h2>
+      <p id="startup-message">正在載入登入或測試畫面。若一直停在這裡，可能是網站程式未載入或連線中斷；請重新整理，仍無法顯示時回報提供連結的人。</p>
+      <button id="startup-retry" type="button" hidden>重新檢查網站</button>
+      <noscript><p>這個測試頁需要 JavaScript。請啟用 JavaScript 後重新整理；若無法啟用，請回報提供連結的人。</p></noscript>
+    </section>
+    <section id="login-section" aria-labelledby="login-title" hidden>
+      <h2 id="login-title">網站登入</h2>
+      <p>請使用提供連結的人交給你的網站密碼。這組密碼只用於登入網站，與 Google AI Studio API key 不同。</p>
+      <form id="login-form">
+        <label for="login-password">網站密碼</label>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+        <button id="login-button" type="submit">登入網站</button>
+      </form>
+      <p id="login-status" class="status" role="status">請輸入網站密碼。</p>
+    </section>
+    <div id="workspace" hidden>
+      <button id="logout-button" type="button" class="logout-button">登出網站</button>
+    <p id="next-step" class="next-step" role="status">現在請先按「檢查連線」。</p>
+    <aside class="privacy-note">
+      <strong>請只用沒有客戶或個人資料的測試 PDF。</strong>
+      不要選含姓名、電話、地址或真實訂單的檔案。上傳後，檔案會保存在<strong>提供此網站的電腦</strong>，不是只留在你的瀏覽器。
+    </aside>
+
+    <section aria-labelledby="basic-title">
+      <h2 id="basic-title"><span class="step-number">1</span> 先確認可以連線</h2>
+      <p>按一次即可。如果檢查通過，再往下選檔。</p>
+      <button id="basic-button" type="button">檢查連線</button>
+      <p id="basic-status" class="status" role="status">尚未檢查。請先按上方按鈕。</p>
+      <details>
+        <summary>查看範例資料顯示結果</summary>
+        <div class="table-wrap"><table><thead><tr><th>範例品項</th><th>數量</th></tr></thead><tbody id="sample-body"></tbody></table></div>
+      </details>
+    </section>
+
+    <section aria-labelledby="upload-title">
+      <h2 id="upload-title"><span class="step-number">2</span> 選擇並上傳測試 PDF</h2>
+      <p>檔案上限約 8 MB。選檔後仍要按「確認上傳」，不會自動送出。</p>
+      <label for="pdf-file">選擇測試 PDF：</label>
+      <input id="pdf-file" type="file" accept="application/pdf,.pdf">
+      <p id="selected-file" class="hint">還沒有選檔。</p>
+      <button id="upload-button" type="button" disabled>確認上傳</button>
+      <p id="upload-status" class="status" role="status">請先完成連線檢查，再選一份測試 PDF。</p>
+      <div id="document-list" aria-label="本次已上傳的測試文件"></div>
+    </section>
+
+    <section aria-labelledby="ai-title">
+      <h2 id="ai-title"><span class="step-number">3</span> 選擇模擬或真正 AI 辨識</h2>
+      <p>先試上方的<strong>模擬測試</strong>也可以：它顯示固定範例，與 PDF 內容無關，不會呼叫 Google。</p>
+      <button id="recognize-button" type="button" disabled>開始模擬測試</button>
+      <p id="ai-status" class="status" role="status">請先完成上傳。</p>
+      <p id="result-mode" class="hint">尚未產生結果。</p>
+      <div class="table-wrap"><table><thead><tr><th>品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
+      <div class="real-ai">
+        <h3>若要測真正的 PDF 辨識</h3>
+        <p>先設定你自己的 Google AI Studio API key。金鑰只暫存在這台網站主機的記憶體，15 分鐘後失效；不會寫入報告或資料庫。重新啟動後需重新輸入。</p>
+        <label for="ai-key">Google AI Studio API key</label>
+        <input id="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="貼上 API key">
+        <button id="save-key" type="button">設定金鑰</button>
+        <button id="clear-key" type="button" disabled>清除金鑰</button>
+        <p id="key-status" class="status" role="status">尚未設定金鑰；仍可使用上方模擬測試。</p>
+        <button id="check-key" type="button" disabled>先測文字連線</button>
+        <p id="check-status" class="status" role="status">文字測試只確認金鑰、模型與連線，不能證明 PDF 辨識成功。</p>
+        <p class="privacy-note"><strong>真正辨識會把這份 PDF 傳給 Google，可能使用你的 API 額度。</strong>請只使用已獲准外傳、沒有客戶或個資的測試文件；每次辨識都需另外確認。</p>
+        <button id="real-button" type="button" disabled>把這份 PDF 交給 Google 辨識</button>
+        <p id="real-status" class="status" role="status">請先上傳測試 PDF 並設定金鑰。</p>
+      </div>
+      <details id="advanced-tests">
+        <summary>進階：模擬失敗或重新測試</summary>
+        <p>只有在提供連結的人請你排查問題時，才需要使用這裡。</p>
+        <label for="scenario">模擬情況</label>
+        <select id="scenario"><option value="success">正常顯示</option><option value="fail">模擬讀取失敗</option><option value="timeout">模擬等待後仍不確定</option><option value="invalid">模擬結果格式錯誤</option></select>
+        <button id="rerun-button" type="button" disabled>再做一次模擬測試</button>
+      </details>
+    </section>
+
+    <section id="report-section" aria-labelledby="report-title">
+      <h2 id="report-title"><span class="step-number">4</span> 把測試情況回報給提供連結的人</h2>
+      <p>按下方按鈕後，將報告貼回給提供連結的人。報告不包含 PDF 內容、檔名或範例品項。</p>
+      <button id="copy-button" class="copy-button" type="button">複製測試報告</button>
+      <p id="copy-status" class="status" role="status">測試過程中或結束後都可以複製。</p>
+      <details id="report-details"><summary>查看報告內容或手動複製</summary>
+        <textarea id="report" rows="18" readonly aria-label="可手動選取的測試報告"></textarea>
+      </details>
+      <p class="hint">如果整個網站無法打開，請截下瀏覽器錯誤畫面並記下發生時間，再傳給提供連結的人。</p>
+    </section>
+    <footer>真正的 AI 結果需人工核對；公司網路與正式使用仍需另外確認。</footer>
+    </div>
+  </main>
+</body>
+</html>

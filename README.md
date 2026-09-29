@@ -1,6 +1,6 @@
-# OrderFlow PDF 測試頁
+# OrderFlow 物流管理草稿與診斷測試
 
-這是供少量受邀使用者檢查 PDF 上傳與辨識流程的測試服務，不是正式訂單管理系統。頁面提供固定資料的模擬測試，也可由使用者自行輸入 Google AI Studio API key，明確確認後把**測試 PDF**送到 Google Gemini 3.1 Flash-Lite 辨識。真實模型輸出需要人工核對；未提供金鑰時不會呼叫 Google，也不會改用模擬結果冒充辨識結果。
+管理首頁可直接上傳 PDF、明確啟動 Google 辨識、人工編修並儲存品項草稿；目前沒有正式訂單、出貨或實體庫存紀錄。原有診斷測試移至 `/orderflow/test/`，仍提供固定資料模擬與真實辨識。兩種用途的文件和工作彼此隔離。詳細契約與待決事項見 [管理介面第一增量](docs/management-shell-phase1.md)。
 
 ## 本機啟動
 
@@ -11,9 +11,9 @@ uv sync --locked
 uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --auth-file /path/to/local-caddy-auth.caddy
 ```
 
-`--auth-file` 需為含單一 `orderflow` 帳號與 bcrypt hash 的 Caddy `basic_auth` 區塊；缺少或格式錯誤會拒絕啟動。正式服務從 systemd `LoadCredential` 讀取同一 hash，不讀明文密碼檔；ASUS 正式 unit 為 `deploy/orderflow-asus.service`。瀏覽 `http://127.0.0.1:8765/orderflow/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
+`--auth-file` 需為含單一 `orderflow` 帳號與 bcrypt hash 的 Caddy `basic_auth` 區塊；缺少或格式錯誤會拒絕啟動。正式服務從 systemd `LoadCredential` 讀取同一 hash，不讀明文密碼檔；ASUS 正式 unit 為 `deploy/orderflow-asus.service`。瀏覽管理首頁 `http://127.0.0.1:8765/orderflow/`，或診斷頁 `http://127.0.0.1:8765/orderflow/test/`。預設只綁 `127.0.0.1`。頁面、靜態資源與 API 都使用 `/orderflow/` 前綴。上傳 PDF 上限 8 MiB；後端核對大小與 SHA-256，並以有時限的子程序檢查 PDF 基本結構。這不是惡意檔案掃描。
 
-## 使用方式
+## 診斷測試使用方式
 
 1. 先使用提供的網站密碼登入，再檢查網站連線，只用沒有客戶或個人資料、且已獲准外傳的測試 PDF。
 2. 選檔，確認後上傳；PDF 保存在網站主機的資料目錄，不只在瀏覽器。
@@ -26,7 +26,7 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 2026-09-28 已將應用及唯一可寫的 SQLite/PDF 資料遷至 ASUS，公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；HP 舊 `orderflow.service` 已停用，原始資料及停寫備份保留。ASUS app 僅監聽 `127.0.0.1:18081`，HP Caddy 經本機 `127.0.0.1:18082` 的釘選 SSH local forward 連到 ASUS；網站入口改用應用表單登入。主機與資料驗證詳見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)；切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。
 
-正式 ASUS runtime release 為 `a6e619fca9c23bd7a36e6ed5bfde346a97b485b0`。本分支後續 `7e38a5d939daffc54f17b307a54835a4cdde3ab7` 修正遷移安裝器對 release 頂層目錄的權限設定，供未來安裝使用；它未重新部署到 ASUS，不能當作目前 runtime commit。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
+截至本增量開發前，已核對的 ASUS runtime release 為 `eb2f928ce213a6b4b23dca6b04f095f5adc98bb9`。本分支的管理介面尚未部署；部署後須另記實際 runtime commit 與驗證結果。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 
@@ -39,6 +39,7 @@ uv run --locked python -m unittest discover -s tests -v
 node tests/test_report.cjs
 node tests/test_guided_flow.cjs
 node --check web/app.js
+node --check web/manage.js
 ```
 
 測試涵蓋同站 API、PDF 邊界及持久化、公開來源限制、金鑰隔離/清除/重啟、固定模型請求格式、Google 錯誤碼、模擬與可控 stub 工作。沒有真實金鑰時，**不能宣稱 Google API 或 PDF 辨識實測通過**；公司瀏覽器及資料外傳許可也需由使用者確認。

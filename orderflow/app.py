@@ -38,6 +38,8 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "web"
 SCENARIOS = {"success", "fail", "timeout", "invalid", "real"}
 KEY_TTL_SECONDS = 15 * 60
+PURPOSES = {"diagnostic", "management"}
+MAX_DRAFT_JSON_BYTES = 32 * 1024
 MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
 MAX_JOBS_PER_DOCUMENT = 10
@@ -45,10 +47,31 @@ MAX_ACTIVE_KEYS = 32
 SESSION_TTL_MS = 8 * 60 * 60 * 1000
 LOGIN_ATTEMPTS_PER_MINUTE = 5
 SAFE_AI_CODES = {"AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN"}
+SAFE_UPSTREAM_REASONS = {"INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"}
 
 
 def safe_ai_code(code: str, fallback: str) -> str:
     return code if code in SAFE_AI_CODES else fallback
+
+
+def safe_ai_metadata(error: AIError) -> dict[str, int | str]:
+    metadata: dict[str, int | str] = {}
+    status = error.upstream_http_status
+    if type(status) is int and 100 <= status <= 599:
+        metadata["upstream_http_status"] = status
+    if error.upstream_reason in SAFE_UPSTREAM_REASONS:
+        metadata["upstream_reason"] = error.upstream_reason
+    return metadata
+
+
+def audit_event(event: str, reference: str, phase: str,
+                metadata: dict[str, int | str] | None = None) -> None:
+    # Only fixed event/phase labels, canonical UUIDs, and whitelisted metadata.
+    record = {"event": event, "id": reference if valid_uuid(reference) else "invalid",
+              "phase": phase}
+    record.update(metadata or {})
+    print("orderflow_audit " + json.dumps(record, separators=(",", ":")),
+          file=sys.stderr, flush=True)
 
 
 def now_ms() -> int:
@@ -99,30 +122,45 @@ class Store:
         self.files.chmod(0o700)
         self.db_path = self.data_dir / "orderflow.sqlite3"
         with self.db() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions (
+            db.execute("BEGIN IMMEDIATE")
+            for statement in (
+                """CREATE TABLE IF NOT EXISTS sessions (
                   id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, created_ms INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS session_auth (
+                )""",
+                """CREATE TABLE IF NOT EXISTS session_auth (
                   session_id TEXT PRIMARY KEY REFERENCES sessions(id),
                   authenticated_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS documents (
+                )""",
+                """CREATE TABLE IF NOT EXISTS documents (
                   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_key TEXT NOT NULL,
                   size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_ms INTEGER NOT NULL,
                   upload_ms INTEGER NOT NULL, steps TEXT NOT NULL, page_count INTEGER,
+                  purpose TEXT NOT NULL DEFAULT 'diagnostic'
+                    CHECK (purpose IN ('diagnostic','management')),
                   UNIQUE(session_id, request_key)
-                );
-                CREATE TABLE IF NOT EXISTS jobs (
+                )""",
+                """CREATE TABLE IF NOT EXISTS jobs (
                   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, document_id TEXT NOT NULL,
                   request_key TEXT NOT NULL, attempt INTEGER NOT NULL, scenario TEXT NOT NULL,
                   state TEXT NOT NULL, error_code TEXT, result TEXT, steps TEXT NOT NULL,
                   created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER,
                   UNIQUE(session_id, document_id, request_key)
-                );
-            """)
-            if "page_count" not in {row[1] for row in db.execute("PRAGMA table_info(documents)")}:
+                )""",
+            ):
+                db.execute(statement)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+            if "page_count" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN page_count INTEGER")
+            if "purpose" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN purpose TEXT NOT NULL "
+                           "DEFAULT 'diagnostic' CHECK (purpose IN ('diagnostic','management'))")
+            db.execute("""CREATE TABLE IF NOT EXISTS management_drafts (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                document_id TEXT NOT NULL REFERENCES documents(id),
+                source_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+                rows_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+                updated_ms INTEGER NOT NULL
+            )""")
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
         self.db_path.chmod(0o600)
@@ -206,17 +244,24 @@ class Store:
             row = db.execute("SELECT expires_ms FROM session_auth WHERE session_id=?", (session_id,)).fetchone()
         return int(row["expires_ms"]) if row else 0
 
-    def documents(self, session_id: str) -> list[dict]:
+    def documents(self, session_id: str, purpose: str = "diagnostic") -> list[dict]:
+        if purpose not in PURPOSES:
+            raise ValueError("invalid purpose")
         with self.db() as db:
             rows = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count FROM documents "
-                              "WHERE session_id=? ORDER BY created_ms DESC", (session_id,)).fetchall()
+                              "WHERE session_id=? AND purpose=? ORDER BY created_ms DESC",
+                              (session_id, purpose)).fetchall()
         return [dict(row) | {"steps": json.loads(row["steps"])} for row in rows]
 
-    def jobs(self, session_id: str) -> list[dict]:
+    def jobs(self, session_id: str, purpose: str = "diagnostic") -> list[dict]:
+        if purpose not in PURPOSES:
+            raise ValueError("invalid purpose")
         with self.db() as db:
-            rows = db.execute("SELECT id,document_id,attempt,scenario,state,error_code,result,steps,"
-                              "created_ms,started_ms,finished_ms FROM jobs WHERE session_id=? "
-                              "ORDER BY created_ms DESC", (session_id,)).fetchall()
+            rows = db.execute("SELECT j.id,j.document_id,j.attempt,j.scenario,j.state,j.error_code,"
+                              "j.result,j.steps,j.created_ms,j.started_ms,j.finished_ms FROM jobs j "
+                              "JOIN documents d ON d.id=j.document_id "
+                              "WHERE j.session_id=? AND d.session_id=? AND d.purpose=? "
+                              "ORDER BY j.created_ms DESC", (session_id, session_id, purpose)).fetchall()
         return [self.public_job(row) for row in rows]
 
     @staticmethod
@@ -227,24 +272,34 @@ class Store:
         item["mode"] = "real" if item["scenario"] == "real" else "mock"
         return item
 
-    def job(self, session_id: str, job_id: str) -> dict | None:
+    def job(self, session_id: str, job_id: str, purpose: str = "diagnostic") -> dict | None:
+        if purpose not in PURPOSES:
+            raise ValueError("invalid purpose")
         with self.db() as db:
-            row = db.execute("SELECT id,document_id,attempt,scenario,state,error_code,result,steps,"
-                             "created_ms,started_ms,finished_ms FROM jobs WHERE id=? AND session_id=?",
-                             (job_id, session_id)).fetchone()
+            row = db.execute("SELECT j.id,j.document_id,j.attempt,j.scenario,j.state,j.error_code,"
+                             "j.result,j.steps,j.created_ms,j.started_ms,j.finished_ms FROM jobs j "
+                             "JOIN documents d ON d.id=j.document_id "
+                             "WHERE j.id=? AND j.session_id=? AND d.session_id=? AND d.purpose=?",
+                             (job_id, session_id, session_id, purpose)).fetchone()
         return self.public_job(row) if row else None
 
-    def add_document(self, session_id: str, request_key: str, data: bytes, sha: str, elapsed: int, page_count: int) -> dict:
+    def add_document(self, session_id: str, request_key: str, data: bytes, sha: str,
+                     elapsed: int, page_count: int, purpose: str = "diagnostic") -> dict:
+        if purpose not in PURPOSES:
+            raise ValueError("invalid purpose")
+        stored_key = request_key if purpose == "diagnostic" else f"management:{request_key}"
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count FROM documents "
-                                  "WHERE session_id=? AND request_key=?", (session_id, request_key)).fetchone()
+                                  "WHERE session_id=? AND request_key=? AND purpose=?",
+                                  (session_id, stored_key, purpose)).fetchone()
             if existing:
                 if existing["sha256"] != sha or existing["size"] != len(data):
                     raise ValueError("IDEMPOTENCY_CONFLICT")
                 return dict(existing) | {"steps": json.loads(existing["steps"])}
             if self.public_limits:
-                count = db.execute("SELECT COUNT(*) FROM documents WHERE session_id=?", (session_id,)).fetchone()[0]
+                count = db.execute("SELECT COUNT(*) FROM documents WHERE session_id=? AND purpose=?",
+                                   (session_id, purpose)).fetchone()[0]
                 total = db.execute("SELECT COALESCE(SUM(size),0) FROM documents").fetchone()[0]
                 if count >= MAX_DOCUMENTS_PER_SESSION or total + len(data) > MAX_STORED_BYTES:
                     raise ValueError("STORAGE_LIMIT")
@@ -258,19 +313,24 @@ class Store:
             timestamp = now_ms()
             steps = json.dumps({"upload": "pass", "integrity": "pass"})
             try:
-                db.execute("INSERT INTO documents (id,session_id,request_key,size,sha256,created_ms,upload_ms,steps,page_count) VALUES (?,?,?,?,?,?,?,?,?)",
-                           (doc_id, session_id, request_key, len(data), sha, timestamp, elapsed, steps, page_count))
+                db.execute("INSERT INTO documents (id,session_id,request_key,size,sha256,created_ms,"
+                           "upload_ms,steps,page_count,purpose) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (doc_id, session_id, stored_key, len(data), sha, timestamp, elapsed,
+                            steps, page_count, purpose))
             except Exception:
                 path.unlink(missing_ok=True)
                 raise
         return {"id": doc_id, "size": len(data), "sha256": sha, "created_ms": timestamp,
                 "upload_ms": elapsed, "steps": json.loads(steps), "page_count": page_count}
 
-    def add_job(self, session_id: str, document_id: str, request_key: str, scenario: str) -> tuple[dict, bool]:
+    def add_job(self, session_id: str, document_id: str, request_key: str,
+                scenario: str, purpose: str = "diagnostic") -> tuple[dict, bool]:
+        if purpose not in PURPOSES or purpose == "management" and scenario != "real":
+            raise ValueError("invalid purpose/scenario")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            document = db.execute("SELECT id FROM documents WHERE id=? AND session_id=?",
-                                  (document_id, session_id)).fetchone()
+            document = db.execute("SELECT id FROM documents WHERE id=? AND session_id=? AND purpose=?",
+                                  (document_id, session_id, purpose)).fetchone()
             if not document:
                 raise LookupError("DOCUMENT_NOT_FOUND")
             existing = db.execute("SELECT id,document_id,attempt,scenario,state,error_code,result,steps,"
@@ -294,6 +354,75 @@ class Store:
                 "scenario": scenario, "state": "queued", "error_code": None, "result": None,
                 "steps": {"ai": "not_run", "format": "not_run"}, "created_ms": timestamp,
                 "started_ms": None, "finished_ms": None, "mode": "real" if scenario == "real" else "mock"}, True
+
+    @staticmethod
+    def public_draft(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "document_id": row["document_id"],
+                "source_job_id": row["source_job_id"], "rows": json.loads(row["rows_json"]),
+                "revision": row["revision"], "updated_ms": row["updated_ms"]}
+
+    def management_drafts(self, session_id: str) -> list[dict]:
+        with self.db() as db:
+            rows = db.execute("SELECT m.id,m.document_id,m.source_job_id,m.rows_json,m.revision,"
+                              "m.updated_ms FROM management_drafts m "
+                              "JOIN jobs j ON j.id=m.source_job_id AND j.document_id=m.document_id "
+                              "JOIN documents d ON d.id=m.document_id "
+                              "WHERE m.session_id=? AND j.session_id=? AND d.session_id=? "
+                              "AND d.purpose='management' ORDER BY m.updated_ms DESC",
+                              (session_id, session_id, session_id)).fetchall()
+        return [self.public_draft(row) for row in rows]
+
+    def management_draft(self, session_id: str, source_job_id: str) -> dict | None:
+        with self.db() as db:
+            row = db.execute("SELECT m.id,m.document_id,m.source_job_id,m.rows_json,m.revision,"
+                             "m.updated_ms FROM management_drafts m "
+                             "JOIN jobs j ON j.id=m.source_job_id AND j.document_id=m.document_id "
+                             "JOIN documents d ON d.id=m.document_id "
+                             "WHERE m.session_id=? AND j.session_id=? AND d.session_id=? "
+                             "AND d.purpose='management' AND m.source_job_id=?",
+                             (session_id, session_id, session_id, source_job_id)).fetchone()
+        return self.public_draft(row) if row else None
+
+    def save_management_draft(self, session_id: str, source_job_id: str,
+                              rows: object, expected_revision: int) -> tuple[dict, bool]:
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("DRAFT_VERSION_INVALID")
+        checked_rows = validate_draft_rows(rows)
+        rows_json = json.dumps(checked_rows, ensure_ascii=False, separators=(",", ":"))
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = db.execute("SELECT j.document_id FROM jobs j "
+                                "JOIN documents d ON d.id=j.document_id "
+                                "WHERE j.id=? AND j.session_id=? AND d.session_id=? "
+                                "AND d.purpose='management' AND j.scenario='real' AND j.state='done'",
+                                (source_job_id, session_id, session_id)).fetchone()
+            if not source:
+                raise LookupError("DRAFT_SOURCE_NOT_FOUND")
+            existing = db.execute("SELECT id,document_id,source_job_id,rows_json,revision,updated_ms "
+                                  "FROM management_drafts WHERE source_job_id=? AND session_id=?",
+                                  (source_job_id, session_id)).fetchone()
+            if existing:
+                if existing["rows_json"] == rows_json:
+                    return self.public_draft(existing), False
+                if existing["revision"] != expected_revision:
+                    raise ValueError("DRAFT_VERSION_CONFLICT")
+                revision = existing["revision"] + 1
+                db.execute("UPDATE management_drafts SET rows_json=?,revision=?,updated_ms=? "
+                           "WHERE id=?", (rows_json, revision, now_ms(), existing["id"]))
+                draft_id = existing["id"]
+                created = False
+            else:
+                if expected_revision != 0:
+                    raise ValueError("DRAFT_VERSION_CONFLICT")
+                draft_id = str(uuid.uuid4())
+                db.execute("INSERT INTO management_drafts "
+                           "(id,session_id,document_id,source_job_id,rows_json,revision,updated_ms) "
+                           "VALUES (?,?,?,?,?,?,?)", (draft_id, session_id, source["document_id"],
+                                                     source_job_id, rows_json, 1, now_ms()))
+                created = True
+            saved = db.execute("SELECT id,document_id,source_job_id,rows_json,revision,updated_ms "
+                               "FROM management_drafts WHERE id=?", (draft_id,)).fetchone()
+        return self.public_draft(saved), created
 
     def set_job(self, job_id: str, **fields: object) -> None:
         if "steps" in fields:
@@ -331,25 +460,57 @@ def validate_result(value: object) -> list[dict]:
     return [{"description": row["description"], "quantity": row["quantity"]} for row in rows]
 
 
+def validate_draft_rows(value: object) -> list[dict]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 100:
+        raise ValueError("DRAFT_ROWS_INVALID")
+    rows = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"description", "quantity"}:
+            raise ValueError("DRAFT_ROWS_INVALID")
+        description = item["description"]
+        quantity = item["quantity"]
+        if (not isinstance(description, str) or not description.strip()
+                or len(description) > 200 or type(quantity) is not int
+                or not 0 <= quantity <= 1_000_000_000):
+            raise ValueError("DRAFT_ROWS_INVALID")
+        rows.append({"description": description.strip(), "quantity": quantity})
+    return rows
+
+
 def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter) -> None:
+    real = isinstance(adapter, GeminiAdapter)
+    if real:
+        audit_event("real_job", job_id, "start")
     store.set_job(job_id, state="running", started_ms=now_ms())
     try:
-        raw = adapter.recognize(str(store.files / f"{document_id}.pdf"), deadline_seconds=25 if isinstance(adapter, GeminiAdapter) else 5)
+        raw = adapter.recognize(str(store.files / f"{document_id}.pdf"), deadline_seconds=25 if real else 5)
         rows = validate_result(raw)
         store.set_job(job_id, state="done", result=rows, steps={"ai": "pass", "format": "pass"},
                       finished_ms=now_ms())
+        if real:
+            audit_event("real_job", job_id, "done")
     except AIUnknown as exc:
+        metadata = safe_ai_metadata(exc)
         store.set_job(job_id, state="unknown", error_code=safe_ai_code(exc.code, "AI_RESULT_UNKNOWN"),
-                      steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
+                      steps={"ai": "unknown", "format": "not_run", **metadata}, finished_ms=now_ms())
+        if real:
+            audit_event("real_job", job_id, "unknown", metadata)
     except AIError as exc:
+        metadata = safe_ai_metadata(exc)
         store.set_job(job_id, state="failed", error_code=safe_ai_code(exc.code, "AI_FAILURE"),
-                      steps={"ai": "fail", "format": "not_run"}, finished_ms=now_ms())
+                      steps={"ai": "fail", "format": "not_run", **metadata}, finished_ms=now_ms())
+        if real:
+            audit_event("real_job", job_id, "failed", metadata)
     except ValueError:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
                       steps={"ai": "pass", "format": "fail"}, finished_ms=now_ms())
+        if real:
+            audit_event("real_job", job_id, "result_format_invalid")
     except Exception:
         store.set_job(job_id, state="unknown", error_code="INTERNAL_UNKNOWN",
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
+        if real:
+            audit_event("real_job", job_id, "internal_unknown")
 
 
 class AppServer(ThreadingHTTPServer):
@@ -446,6 +607,17 @@ class Handler(BaseHTTPRequestHandler):
         # Access logs could leak paths or headers. Operational logging needs a reviewed policy.
         pass
 
+    def request_id(self) -> str:
+        if not hasattr(self, "_request_id"):
+            supplied = self.headers.get("X-Orderflow-Request-Id")
+            self._request_id = supplied if valid_uuid(supplied) else str(uuid.uuid4())
+        return self._request_id
+
+    def end_headers(self) -> None:
+        self.send_header("X-Orderflow-Origin", "app")
+        self.send_header("X-Orderflow-Request-Id", self.request_id())
+        super().end_headers()
+
     def json_response(self, status: int, value: object, cookie: str | None = None,
                       clear_cookie: bool = False) -> None:
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
@@ -504,10 +676,10 @@ class Handler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def get_json(self) -> dict | None:
+    def get_json(self, max_bytes: int = MAX_JSON_BYTES) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", ""))
-            if not 0 < length <= MAX_JSON_BYTES:
+            if not 0 < length <= max_bytes:
                 raise ValueError
             raw = self.read_body(length, JSON_DEADLINE_SECONDS)
             if len(raw) != length:
@@ -548,11 +720,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if path in {PREFIX, PREFIX + "app.js", PREFIX + "style.css"}:
-            filename = "index.html" if path == PREFIX else path.rsplit("/", 1)[-1]
+        static_routes = {
+            PREFIX: ("index.html", "text/html"),
+            PREFIX + "manage.js": ("manage.js", "text/javascript"),
+            PREFIX + "manage.css": ("manage.css", "text/css"),
+            PREFIX + "test/": ("test.html", "text/html"),
+            PREFIX + "app.js": ("app.js", "text/javascript"),
+            PREFIX + "style.css": ("style.css", "text/css"),
+        }
+        if path == PREFIX + "test":
+            self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+            self.send_header("Location", PREFIX + "test/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path in static_routes:
+            filename, content_type = static_routes[path]
             data = (STATIC / filename).read_bytes()
-            content_type = {"index.html": "text/html", "app.js": "text/javascript",
-                            "style.css": "text/css"}[filename]
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type + "; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -574,6 +758,18 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, {"version": VERSION, "max_pdf_bytes": MAX_PDF_BYTES,
                                      "mode": "mock-and-real", "documents": self.server.store.documents(session_id),
                                      "jobs": self.server.store.jobs(session_id),
+                                     "ai_key_configured": self.server.get_key(session_id) is not None,
+                                     "ai_model": GEMINI_MODEL,
+                                     "auth_expires_ms": self.server.store.session_expires(session_id)})
+            return
+        if path == PREFIX + "api/management/bootstrap":
+            session_id = self.get_session()
+            if not session_id:
+                return
+            self.json_response(200, {"version": VERSION, "max_pdf_bytes": MAX_PDF_BYTES,
+                                     "documents": self.server.store.documents(session_id, "management"),
+                                     "jobs": self.server.store.jobs(session_id, "management"),
+                                     "drafts": self.server.store.management_drafts(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
                                      "ai_model": GEMINI_MODEL,
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
@@ -600,6 +796,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = self.server.store.job(session_id, job_id)
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
+            return
+        if path.startswith(PREFIX + "api/management/jobs/"):
+            session_id = self.get_session()
+            if not session_id:
+                return
+            job_id = path[len(PREFIX + "api/management/jobs/"):]
+            if not valid_uuid(job_id):
+                self.error(404, "JOB_NOT_FOUND")
+                return
+            job = self.server.store.job(session_id, job_id, "management")
+            self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
+            return
+        if path.startswith(PREFIX + "api/management/drafts/"):
+            session_id = self.get_session()
+            if not session_id:
+                return
+            job_id = path[len(PREFIX + "api/management/drafts/"):]
+            if not valid_uuid(job_id):
+                self.error(404, "DRAFT_NOT_FOUND")
+                return
+            draft = self.server.store.management_draft(session_id, job_id)
+            self.json_response(200, draft) if draft else self.error(404, "DRAFT_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/") and not self.get_session():
             return
@@ -667,11 +885,21 @@ class Handler(BaseHTTPRequestHandler):
             if not key:
                 self.error(409, "KEY_REQUIRED")
                 return
+            request_id = self.request_id()
+            audit_event("key_check", request_id, "start")
             try:
                 GeminiAdapter(key).check_text()
             except (AIError, AIUnknown) as exc:
-                self.error(502, safe_ai_code(exc.code, "AI_HTTP_UNKNOWN"))
+                metadata = safe_ai_metadata(exc)
+                audit_event("key_check", request_id, "failed", {"app_http_status": 502, **metadata})
+                self.json_response(502, {"error_code": safe_ai_code(exc.code, "AI_HTTP_UNKNOWN"),
+                                         **metadata})
                 return
+            except Exception:
+                audit_event("key_check", request_id, "internal_unknown", {"app_http_status": 502})
+                self.error(502, "AI_HTTP_UNKNOWN")
+                return
+            audit_event("key_check", request_id, "done", {"app_http_status": 200})
             self.json_response(200, {"status": "ok", "model": GEMINI_MODEL})
             return
         if path == PREFIX + "api/echo":
@@ -684,15 +912,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.json_response(200, {"nonce": nonce})
             return
-        if path == PREFIX + "api/documents":
-            self.upload(session_id)
+        if path in {PREFIX + "api/documents", PREFIX + "api/management/documents"}:
+            purpose = "management" if path == PREFIX + "api/management/documents" else "diagnostic"
+            self.upload(session_id, purpose)
             return
-        if path == PREFIX + "api/jobs":
+        if path in {PREFIX + "api/jobs", PREFIX + "api/management/jobs"}:
+            purpose = "management" if path == PREFIX + "api/management/jobs" else "diagnostic"
             value = self.get_json()
             if value is None:
                 return
             document_id, key, scenario = (value.get(name) for name in ("document_id", "request_key", "scenario"))
-            if not valid_uuid(document_id) or not valid_uuid(key) or scenario not in SCENARIOS:
+            if (not valid_uuid(document_id) or not valid_uuid(key) or scenario not in SCENARIOS
+                    or purpose == "management" and scenario != "real"):
                 self.error(400, "BAD_JOB_REQUEST")
                 return
             ai_key = self.server.get_key(session_id) if scenario == "real" else None
@@ -700,7 +931,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(409, "KEY_REQUIRED")
                 return
             try:
-                job, created = self.server.store.add_job(session_id, document_id, key, scenario)
+                job, created = self.server.store.add_job(session_id, document_id, key, scenario, purpose)
             except LookupError:
                 self.error(404, "DOCUMENT_NOT_FOUND")
                 return
@@ -742,24 +973,60 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.error(HTTPStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
 
-    do_PUT = _unsupported_api_method
+    def do_PUT(self) -> None:
+        if not self.valid_host():
+            return
+        session_id = self.get_session()
+        if not session_id or not self.valid_origin():
+            return
+        if self.headers.get("X-Orderflow-Request") != "1":
+            self.error(403, "REQUEST_HEADER_REQUIRED")
+            return
+        path = urlsplit(self.path).path
+        if not path.startswith(PREFIX + "api/management/drafts/"):
+            self.error(HTTPStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
+            return
+        job_id = path[len(PREFIX + "api/management/drafts/"):]
+        if not valid_uuid(job_id):
+            self.error(404, "DRAFT_SOURCE_NOT_FOUND")
+            return
+        value = self.get_json(MAX_DRAFT_JSON_BYTES)
+        if value is None:
+            return
+        if set(value) != {"rows", "revision"}:
+            self.error(400, "DRAFT_ROWS_INVALID")
+            return
+        try:
+            draft, created = self.server.store.save_management_draft(
+                session_id, job_id, value["rows"], value["revision"])
+        except LookupError:
+            self.error(404, "DRAFT_SOURCE_NOT_FOUND")
+            return
+        except ValueError as exc:
+            code = str(exc)
+            self.error(409 if code == "DRAFT_VERSION_CONFLICT" else 400,
+                       code if code in {"DRAFT_VERSION_CONFLICT", "DRAFT_VERSION_INVALID",
+                                        "DRAFT_ROWS_INVALID"} else "DRAFT_ROWS_INVALID")
+            return
+        self.json_response(201 if created else 200, draft)
+
     do_PATCH = _unsupported_api_method
     do_OPTIONS = _unsupported_api_method
     do_HEAD = _unsupported_api_method
 
-    def upload(self, session_id: str) -> None:
+    def upload(self, session_id: str, purpose: str = "diagnostic") -> None:
         if not self.server.public_origin:
-            self._upload_impl(session_id)
+            self._upload_impl(session_id, purpose)
             return
         if not self.server.upload_slots.acquire(blocking=False):
             self.error(429, "UPLOAD_BUSY")
             return
         try:
-            self._upload_impl(session_id)
+            self._upload_impl(session_id, purpose)
         finally:
             self.server.upload_slots.release()
 
-    def _upload_impl(self, session_id: str) -> None:
+    def _upload_impl(self, session_id: str, purpose: str) -> None:
         start = time.monotonic()
         key = self.headers.get("X-Request-Key")
         sha = self.headers.get("X-File-SHA256", "")
@@ -806,7 +1073,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             doc = self.server.store.add_document(session_id, key, data, calculated,
-                                                 int((time.monotonic() - start) * 1000), page_count)
+                                                 int((time.monotonic() - start) * 1000), page_count,
+                                                 purpose)
         except ValueError as exc:
             code = str(exc)
             self.error(507 if code == "STORAGE_LIMIT" else 409,

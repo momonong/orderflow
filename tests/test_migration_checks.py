@@ -12,6 +12,7 @@ import tempfile
 import tarfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from deploy.migration_checks import inspect_state
 from orderflow.app import Store
@@ -20,6 +21,31 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_management_upgrade_health_checks_new_and_old_runtime(self):
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
+        wait_app = runpy.run_path(str(deploy_dir / "upgrade-asus-management.py"))["wait_app"]
+        class Response:
+            status = 200
+            def __init__(self, path, managed):
+                self.path, self.managed = path, managed
+                if path.startswith("/orderflow/api/"):
+                    self.status = 401 if managed or path == "/orderflow/api/bootstrap" else 404
+            def read(self):
+                if self.path == "/orderflow/":
+                    return b"OrderFlow manage.js" if self.managed else b"OrderFlow app.js"
+                return b'{"error_code":"AUTH_REQUIRED"}' if self.status == 401 else b'{}'
+        class Connection:
+            path = None
+            def __init__(self, *args, **kwargs): pass
+            def request(self, method, path, headers): self.path = path
+            def getresponse(self): return Response(self.path, self.managed)
+            def close(self): pass
+        for managed in (True, False):
+            class Runtime(Connection): pass
+            Runtime.managed = managed
+            with patch.dict(wait_app.__globals__, {"http": type("HTTP", (), {"client": type("Client", (), {"HTTPConnection": Runtime})})()}):
+                wait_app(expect_management=managed)
+
     def test_upgrade_release_restores_tarfile_directory_access(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
         make_readable = runpy.run_path(str(deploy_dir / "upgrade-asus-release.py"))["make_release_readable"]
@@ -115,6 +141,29 @@ class MigrationChecksTests(unittest.TestCase):
             self.assertEqual(migrated.documents(owner)[0]["id"], doc["id"])
             self.assertEqual(migrated.jobs(owner)[0]["id"], job["id"])
             self.assertEqual(inspect_state(snapshot)["documents"], 1)
+
+    def test_pre_management_schema_upgrades_atomically_and_is_repeatable(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            (state / "files").mkdir()
+            session_id, document_id, job_id = (str(uuid.uuid4()) for _ in range(3))
+            with sqlite3.connect(state / "orderflow.sqlite3") as db:
+                db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, created_ms INTEGER NOT NULL)")
+                db.execute("CREATE TABLE documents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_key TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_ms INTEGER NOT NULL, upload_ms INTEGER NOT NULL, steps TEXT NOT NULL, page_count INTEGER, UNIQUE(session_id,request_key))")
+                db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, document_id TEXT NOT NULL, request_key TEXT NOT NULL, attempt INTEGER NOT NULL, scenario TEXT NOT NULL, state TEXT NOT NULL, error_code TEXT, result TEXT, steps TEXT NOT NULL, created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER, UNIQUE(session_id,document_id,request_key))")
+                db.execute("INSERT INTO sessions VALUES (?,?,?)", (session_id, "token-hash", 1))
+                db.execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?)", (document_id, session_id, str(uuid.uuid4()), len(PDF), hashlib.sha256(PDF).hexdigest(), 1, 1, '{}', 1))
+                db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, session_id, document_id, str(uuid.uuid4()), 1, "success", "done", None, '[{"description":"legacy","quantity":1}]', '{}', 1, 1, 2))
+            (state / "files" / f"{document_id}.pdf").write_bytes(PDF)
+            first = Store(state)
+            second = Store(state)
+            self.assertEqual(first.documents(session_id)[0]["id"], document_id)
+            self.assertEqual(second.jobs(session_id)[0]["id"], job_id)
+            self.assertEqual(second.documents(session_id, "management"), [])
+            with second.db() as db:
+                self.assertEqual(db.execute("SELECT purpose FROM documents WHERE id=?", (document_id,)).fetchone()[0], "diagnostic")
+                self.assertEqual(db.execute("PRAGMA quick_check").fetchone()[0], "ok")
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM management_drafts").fetchone()[0], 0)
 
     def test_snapshot_preserves_rows_and_rejects_corrupt_pdf_or_job_owner(self):
         with tempfile.TemporaryDirectory() as root:

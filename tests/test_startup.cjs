@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const html = fs.readFileSync('web/index.html', 'utf8');
+const html = fs.readFileSync('web/test.html', 'utf8');
 assert.match(html, /<section id="startup-section"[^>]*role="status">/);
 assert.match(html, /<noscript>[^]*?JavaScript[^]*?<\/noscript>/);
 assert.match(html, /<section id="login-section"[^>]* hidden>/);

@@ -166,32 +166,43 @@ function responseTypeHint(value) {
   if (type === "text/plain") return "TEXT";
   return type ? "OTHER" : "MISSING";
 }
+function safeUpstreamReason(value) {
+  return ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"].includes(value) ? value : undefined;
+}
 async function api(path, options = {}, timeoutMs = 5000) {
   const started = performance.now();
+  const requestId = crypto.randomUUID();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(base + path, {
       ...options, signal: controller.signal,
-      headers: {...options.headers, "X-Orderflow-Request": "1"},
+      headers: {...options.headers, "X-Orderflow-Request": "1",
+                "X-Orderflow-Request-Id": requestId},
       credentials: "same-origin", cache: "no-store"
     });
+    const appMarker = response.headers.get("X-Orderflow-Origin") === "app" ? "APP" : "MISSING";
     let data;
     try { data = await response.json(); }
-    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status,
+    catch { throw {code: "BAD_JSON_RESPONSE", status: response.status, requestId, appMarker,
                    responseType: responseTypeHint(response.headers.get("Content-Type"))}; }
     if (!response.ok) {
       if (response.status === 401 && path !== "login" && path !== "logout") {
         showLogin(data.error_code === "SESSION_EXPIRED" ? "登入已過期，請重新輸入網站密碼。" : undefined);
       }
-      throw {code: safeCode({code: data.error_code}, "HTTP_ERROR"), status: response.status};
+      throw {code: safeCode({code: data.error_code}, "HTTP_ERROR"), status: response.status,
+             requestId, appMarker, responseType: responseTypeHint(response.headers.get("Content-Type")),
+             upstreamStatus: Number.isInteger(data.upstream_http_status) &&
+               data.upstream_http_status >= 100 && data.upstream_http_status <= 599
+               ? data.upstream_http_status : undefined,
+             upstreamReason: safeUpstreamReason(data.upstream_reason)};
     }
-    return {data, status: response.status};
+    return {data, status: response.status, requestId};
   } catch (error) {
     const ms = Math.round(performance.now() - started);
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true, ms};
+    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true, ms, requestId};
     if (error?.code) throw {...error, ms};
-    throw {code: "NETWORK_ERROR", unknown: true, ms};
+    throw {code: "NETWORK_ERROR", unknown: true, ms, requestId};
   } finally { clearTimeout(timer); }
 }
 function renderRows(tbody, rows) {
@@ -225,6 +236,10 @@ function updateReport() {
     if (entry.ms !== undefined) extras.push(`${entry.ms} ms`);
     if (entry.http !== undefined) extras.push(`HTTP ${entry.http}`);
     if (entry.responseType) extras.push(`回應類型 ${entry.responseType}`);
+    if (entry.appMarker) extras.push(`應用標記 ${entry.appMarker}`);
+    if (entry.requestId) extras.push(`請求識別 ${entry.requestId}`);
+    if (entry.upstreamStatus) extras.push(`上游 HTTP ${entry.upstreamStatus}`);
+    if (entry.upstreamReason) extras.push(`上游分類 ${entry.upstreamReason}`);
     if (entry.code) extras.push(entry.code);
     lines.push(`- ${titles[name]}：${labels[entry.status]}${extras.length ? "（" + extras.join("，") + "）" : ""}`);
   }
@@ -275,7 +290,9 @@ function showJob(job) {
     ? "下表是 Google 回傳的 PDF 辨識結果，請人工核對。"
     : "下表是固定模擬範例，與 PDF 內容無關。";
   const duration = job.started_ms && job.finished_ms ? job.finished_ms - job.started_ms : undefined;
-  mark("ai", job.steps.ai || "not_run", {ms: duration, code: job.error_code || undefined});
+  mark("ai", job.steps.ai || "not_run", {ms: duration, code: job.error_code || undefined,
+    upstreamStatus: job.steps.upstream_http_status,
+    upstreamReason: safeUpstreamReason(job.steps.upstream_reason)});
   mark("format", job.steps.format || "not_run");
   if (job.state === "done") {
     try {
@@ -467,7 +484,9 @@ async function checkKey() {
     const uncertain = error.unknown || ["AI_HTTP_UNKNOWN", "AI_TIMEOUT_UNKNOWN",
       "BAD_JSON_RESPONSE", "HTTP_ERROR"].includes(error.code);
     mark("text_check", uncertain ? "unknown" : "fail", {code: safeCode(error, "AI_HTTP_UNKNOWN"),
-      http: error.status, ms: error.ms, responseType: error.responseType});
+      http: error.status, ms: error.ms, responseType: error.responseType,
+      requestId: error.requestId, appMarker: error.appMarker,
+      upstreamStatus: error.upstreamStatus, upstreamReason: error.upstreamReason});
     setStatus("check-status", keyAdvice(safeCode(error, "AI_HTTP_UNKNOWN")), uncertain ? "unknown" : "fail");
   } finally { keyBusy = false; updateRealControls(); }
 }

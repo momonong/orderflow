@@ -1,4 +1,5 @@
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import io
 import json
@@ -60,13 +61,14 @@ class PublicAiTests(unittest.TestCase):
     def request(self, method, path, body=None, headers=None, cookie=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=4)
         hdr = {"Host": "momonong.me", **(headers or {})}
-        if method in {"POST", "DELETE"}:
+        if method in {"POST", "PUT", "DELETE"}:
             hdr.setdefault("Origin", ORIGIN)
             hdr["X-Orderflow-Request"] = "1"
         if cookie:
             hdr["Cookie"] = cookie
         conn.request(method, path, body=body, headers=hdr)
         resp = conn.getresponse()
+        self.last_headers = dict(resp.getheaders())
         raw = resp.read()
         data = json.loads(raw) if raw and resp.getheader("Content-Type", "").startswith("application/json") else raw
         result = resp.status, data, resp.getheader("Set-Cookie")
@@ -105,7 +107,126 @@ class PublicAiTests(unittest.TestCase):
         status, _, _ = self.request("POST", "/orderflow/api/documents", b"fake",
                                     {"Content-Type": "application/pdf"}, "of_session=invalid")
         self.assertEqual(status, 401)
-        self.assertEqual(self.request("GET", "/orderflow/")[0], 200)
+        status, home, _ = self.request("GET", "/orderflow/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"manage.js", home)
+        status, diagnostic, _ = self.request("GET", "/orderflow/test/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"app.js", diagnostic)
+        self.assertEqual(self.request("GET", "/orderflow/test")[0], 308)
+
+    def test_app_response_marker_and_safe_google_check_reason(self):
+        request_id = str(uuid.uuid4())
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        with patch.object(GeminiAdapter, "check_text",
+                          side_effect=AIError("AI_BAD_REQUEST", upstream_http_status=400,
+                                              upstream_reason="INVALID_ARGUMENT")):
+            status, body, _ = self.request("POST", "/orderflow/api/key/check",
+                                           headers={"X-Orderflow-Request-Id": request_id}, cookie=self.cookie)
+        self.assertEqual((status, body), (502, {"error_code": "AI_BAD_REQUEST",
+                                                   "upstream_http_status": 400,
+                                                   "upstream_reason": "INVALID_ARGUMENT"}))
+        self.assertEqual(self.last_headers["X-Orderflow-Origin"], "app")
+        self.assertEqual(self.last_headers["X-Orderflow-Request-Id"], request_id)
+        status, _, _ = self.request("GET", "/orderflow/api/bootstrap",
+                                    headers={"X-Orderflow-Request-Id": "not-a-uuid"}, cookie=self.cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(uuid.UUID(self.last_headers["X-Orderflow-Request-Id"]))
+        self.assertNotEqual(self.last_headers["X-Orderflow-Request-Id"], "not-a-uuid")
+
+    def test_management_scope_real_job_and_draft_revision(self):
+        diagnostic = self.upload()[1]
+        key = str(uuid.uuid4())
+        status, managed, _ = self.request("POST", "/orderflow/api/management/documents", PDF, {
+            "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+            "X-File-SHA256": hashlib.sha256(PDF).hexdigest(), "X-Request-Key": key,
+        }, self.cookie)
+        self.assertEqual(status, 201)
+        self.assertNotEqual(managed["id"], diagnostic["id"])
+        # Replaying a management upload does not create a second document.
+        status, replay, _ = self.request("POST", "/orderflow/api/management/documents", PDF, {
+            "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+            "X-File-SHA256": hashlib.sha256(PDF).hexdigest(), "X-Request-Key": key,
+        }, self.cookie)
+        self.assertEqual((status, replay["id"]), (201, managed["id"]))
+        diagnostic_view = self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[1]
+        management_view = self.request("GET", "/orderflow/api/management/bootstrap", cookie=self.cookie)[1]
+        self.assertEqual([doc["id"] for doc in diagnostic_view["documents"]], [diagnostic["id"]])
+        self.assertEqual([doc["id"] for doc in management_view["documents"]], [managed["id"]])
+        self.assertEqual(management_view["drafts"], [])
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        self.assertEqual(self.post_json("/orderflow/api/management/jobs", {
+            "document_id": diagnostic["id"], "request_key": str(uuid.uuid4()), "scenario": "real"
+        })[0], 404)
+        self.assertEqual(self.post_json("/orderflow/api/jobs", {
+            "document_id": managed["id"], "request_key": str(uuid.uuid4()), "scenario": "real"
+        })[0], 404)
+        self.assertEqual(self.post_json("/orderflow/api/management/jobs", {
+            "document_id": managed["id"], "request_key": str(uuid.uuid4()), "scenario": "success"
+        })[0], 400)
+        rows = [{"description": "人工核對品項", "quantity": 2}]
+        with patch.object(GeminiAdapter, "recognize", return_value={"items": rows}):
+            job_key = str(uuid.uuid4())
+            status, job, _ = self.post_json("/orderflow/api/management/jobs", {
+                "document_id": managed["id"], "request_key": job_key, "scenario": "real"
+            })
+            self.assertEqual(status, 202)
+            status, same, _ = self.post_json("/orderflow/api/management/jobs", {
+                "document_id": managed["id"], "request_key": job_key, "scenario": "real"
+            })
+            self.assertEqual(same["id"], job["id"])
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                result = self.request("GET", "/orderflow/api/management/jobs/" + job["id"], cookie=self.cookie)[1]
+                if result["state"] == "done":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(result["state"], "done")
+        self.assertEqual(self.request("GET", "/orderflow/api/jobs/" + job["id"], cookie=self.cookie)[0], 404)
+        self.assertEqual(self.request("GET", "/orderflow/api/management/jobs/" + job["id"], cookie=self.cookie)[0], 200)
+        path = "/orderflow/api/management/drafts/" + job["id"]
+        self.assertEqual(self.request("PUT", path, json.dumps({"rows": rows, "revision": 0}),
+                                      {"Content-Type": "application/json"}, self.cookie)[0], 201)
+        saved = self.request("GET", path, cookie=self.cookie)[1]
+        self.assertEqual((saved["rows"], saved["revision"]), (rows, 1))
+        self.assertEqual(self.request("PUT", path, json.dumps({"rows": rows, "revision": 0}),
+                                      {"Content-Type": "application/json"}, self.cookie)[1]["revision"], 1)
+        changed = [{"description": "修正", "quantity": 3}]
+        self.assertEqual(self.request("PUT", path, json.dumps({"rows": changed, "revision": 0}),
+                                      {"Content-Type": "application/json"}, self.cookie)[1]["error_code"],
+                         "DRAFT_VERSION_CONFLICT")
+        status, updated, _ = self.request("PUT", path, json.dumps({"rows": changed, "revision": 1}),
+                                          {"Content-Type": "application/json"}, self.cookie)
+        self.assertEqual((status, updated["revision"]), (200, 2))
+        self.assertEqual(self.request("PUT", path, json.dumps({"rows": [{"description": "", "quantity": 1}], "revision": 2}),
+                                      {"Content-Type": "application/json"}, self.cookie)[0], 400)
+        self.assertEqual(self.request("GET", path, cookie="of_session=invalid")[0], 401)
+        restarted = Store(Path(self.tmp.name))
+        self.assertEqual(restarted.management_draft(self.store.session(self.cookie.split("=", 1)[1]), job["id"])["rows"], changed)
+        self.assertEqual(restarted.job(self.store.session(self.cookie.split("=", 1)[1]), job["id"], "management")["result"], rows)
+
+    def test_management_first_save_concurrent_conflict(self):
+        session_id = self.store.session(self.cookie.split("=", 1)[1])
+        doc = self.store.add_document(session_id, str(uuid.uuid4()), PDF,
+                                      hashlib.sha256(PDF).hexdigest(), 1, 1, "management")
+        job, _ = self.store.add_job(session_id, doc["id"], str(uuid.uuid4()), "real", "management")
+        original = [{"description": "來源", "quantity": 1}]
+        self.store.set_job(job["id"], state="done", result=original)
+        alternatives = [[{"description": "甲", "quantity": 2}],
+                        [{"description": "乙", "quantity": 3}]]
+        def attempt(rows):
+            try:
+                return self.store.save_management_draft(session_id, job["id"], rows, 0)
+            except ValueError as exc:
+                return str(exc)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, alternatives))
+        self.assertEqual(sum(isinstance(item, tuple) for item in outcomes), 1)
+        self.assertIn("DRAFT_VERSION_CONFLICT", outcomes)
+        saved = self.store.management_draft(session_id, job["id"])
+        self.assertEqual(saved["revision"], 1)
+        self.assertIn(saved["rows"], alternatives)
+        self.assertEqual(self.store.job(session_id, job["id"], "management")["result"], original)
 
     def test_login_rotation_logout_relogin_and_key_clear(self):
         original = self.cookie
@@ -313,6 +434,18 @@ class GeminiAdapterTests(unittest.TestCase):
                 with self.assertRaises(AIError) as caught:
                     _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
                 self.assertEqual(caught.exception.code, code)
+        for raw, reason in [(b'{"error":{"status":"FAILED_PRECONDITION","message":"secret"}}',
+                             "FAILED_PRECONDITION"),
+                            (b'{"error":{"status":"PRIVATE_UNKNOWN","message":"secret"}}',
+                             "UNCLASSIFIED"), (b"not json", "UNCLASSIFIED")]:
+            error = urllib.error.HTTPError("url", 400, "secret", {}, io.BytesIO(raw))
+            with self.subTest(reason=reason), patch("orderflow.gemini.urllib.request.urlopen", side_effect=error):
+                with self.assertRaises(AIError) as caught:
+                    _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
+                self.assertEqual(caught.exception.code, "AI_BAD_REQUEST")
+                self.assertEqual(caught.exception.upstream_http_status, 400)
+                self.assertEqual(caught.exception.upstream_reason, reason)
+                self.assertNotIn("secret", str(caught.exception))
         with patch("orderflow.gemini.urllib.request.urlopen", side_effect=TimeoutError("secret")):
             with self.assertRaises(AIUnknown) as caught:
                 _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
