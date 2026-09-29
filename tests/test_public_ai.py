@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 import http.client
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -471,6 +473,97 @@ class PublicAiTests(unittest.TestCase):
         self.assertNotIn(opaque, json.dumps(body))
         self.assertNotIn(opaque, json.dumps(self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[1]))
         self.assertNotIn(opaque, self.store.db_path.read_bytes().decode("utf-8", errors="ignore"))
+
+
+    def test_synthetic_pdf_to_typed_records_reopen_and_ui_reports(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is needed for the browser-model integration check")
+        kinds = ("purchase_order", "invoice")
+        jobs = {}
+        for kind in kinds:
+            upload_headers = {"Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+                              "X-File-SHA256": hashlib.sha256(PDF).hexdigest(),
+                              "X-Request-Key": str(uuid.uuid4()), "X-Document-Kind": kind}
+            status, doc, _ = self.request("POST", "/orderflow/api/management/documents",
+                                           PDF, upload_headers, self.cookie)
+            self.assertEqual(status, 201)
+            self.assertEqual(doc["document_kind"], kind)
+            jobs[kind] = {"document": doc}
+        def fake_recognize(adapter, pdf_path, *, deadline_seconds):
+            self.assertGreater(deadline_seconds, 0)
+            self.assertEqual(Path(pdf_path).read_bytes(), PDF)
+            if adapter.document_kind == "purchase_order":
+                return {"items": [
+                    {"orderNo": "=PO-1", "client": "Buyer A", "product": " PO Product A ",
+                     "code": "A", "qty": "10.50", "amount": "21.00", "currency": "USD", "unit": "PCS"},
+                    {"orderNo": "PO-2", "client": "Buyer B", "product": "PO Product B",
+                     "code": "B", "qty": "5", "amount": "1200", "currency": "KRW", "unit": "PCS"}]}
+            return {"items": [
+                {"invoiceNo": "INV-1", "client": "Buyer A", "product": "PO Product A",
+                 "code": "A", "qty": "3.25", "amount": "6.50", "currency": "USD", "unit": "PCS"},
+                {"invoiceNo": "INV-2", "client": "Buyer B", "product": "PO Product B",
+                 "code": "B", "qty": "1.5", "amount": "360", "currency": "KRW", "unit": "PCS"},
+                {"invoiceNo": "INV-3", "client": "Buyer C", "product": "Unmatched",
+                 "code": "C", "qty": "2", "amount": "8", "currency": "USD", "unit": "PCS"}]}
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+        with patch.object(GeminiAdapter, "recognize", fake_recognize):
+            for kind in kinds:
+                status, job, _ = self.post_json("/orderflow/api/management/jobs", {
+                    "document_id": jobs[kind]["document"]["id"],
+                    "request_key": str(uuid.uuid4()), "scenario": "real"})
+                self.assertEqual(status, 202)
+                for _ in range(100):
+                    ready = self.request("GET", "/orderflow/api/management/jobs/" + job["id"],
+                                         cookie=self.cookie)[1]
+                    if ready["state"] == "done":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(ready["state"], "done")
+                jobs[kind]["job"] = ready
+        order_rows = []
+        for suggestion in jobs["purchase_order"]["job"]["result"]:
+            order_rows.append({"id": str(uuid.uuid4()), "orderNo": suggestion["orderNo"],
+                               "invoiceNo": None, "client": suggestion["client"],
+                               "product": suggestion["product"], "code": suggestion["code"],
+                               "qty": suggestion["qty"], "unitPrice": None,
+                               "amount": suggestion["amount"], "currency": suggestion["currency"],
+                               "date": None, "incoterms": None, "unit": suggestion["unit"],
+                               "status": "確定", "linked_order_row_id": None, "deleted": False})
+        for kind in kinds:
+            suggestions = jobs[kind]["job"]["result"]
+            if kind == "purchase_order":
+                rows = order_rows
+            else:
+                rows = []
+                for index, suggestion in enumerate(suggestions):
+                    rows.append({"id": str(uuid.uuid4()), "orderNo": None,
+                                 "invoiceNo": suggestion["invoiceNo"], "client": suggestion["client"],
+                                 "product": suggestion["product"], "code": suggestion["code"],
+                                 "qty": suggestion["qty"], "unitPrice": None,
+                                 "amount": suggestion["amount"], "currency": suggestion["currency"],
+                                 "date": None, "incoterms": None, "unit": suggestion["unit"],
+                                 "status": None,
+                                 "linked_order_row_id": order_rows[index]["id"] if index < 2 else None,
+                                 "deleted": False})
+            path = "/orderflow/api/management/record-sets/" + jobs[kind]["document"]["id"]
+            body = {"source_job_id": jobs[kind]["job"]["id"], "revision": 0, "rows": rows}
+            status, saved, _ = self.request("PUT", path, json.dumps(body),
+                                            {"Content-Type": "application/json"}, self.cookie)
+            self.assertEqual((status, saved["revision"], len(saved["rows"])),
+                             (201, 1, len(rows)))
+        reopened = Store(Path(self.tmp.name))
+        self.server.store = reopened
+        status, bootstrap, _ = self.request("GET", "/orderflow/api/management/bootstrap",
+                                             cookie=self.cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(bootstrap["record_sets"]), 2)
+        self.assertEqual(len(bootstrap["documents"]), 2)
+        script = Path(__file__).with_name("check_management_bootstrap_ui.cjs")
+        checked = subprocess.run(["node", str(script)], input=json.dumps(bootstrap),
+                                 text=True, capture_output=True, timeout=10,
+                                 cwd=Path(__file__).resolve().parents[1], check=False)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertIn("HTTP bootstrap to UI lists", checked.stdout)
 
 
 class GeminiAdapterTests(unittest.TestCase):

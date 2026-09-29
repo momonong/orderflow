@@ -3,7 +3,8 @@ const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
 const state = {documents: [], jobs: [], drafts: [], recordSets: [], key: false, selected: null,
   job: null, rows: [], revision: 0, dirty: false, busy: false, uploadKey: null,
-  uploadFile: null, pendingFile: null, pendingKind: null, jobKey: null, page: "dashboard"};
+  uploadFile: null, pendingFile: null, pendingKind: null,
+  pendingJobKeys: new Map(), page: "dashboard"};
 let keyFieldUsed = false;
 let keyWorkspaceShown = false;
 function clearKeyInput() {
@@ -79,7 +80,7 @@ function showLogin(message = "請輸入網站密碼。") {
   el("logout").hidden = true; el("password").value = ""; clearKeyInput();
   state.documents = []; state.jobs = []; state.drafts = []; state.recordSets = [];
   state.selected = null; state.job = null; state.pendingFile = null; state.pendingKind = null;
-  state.rows = []; state.key = false; el("csv-export").hidden = true;
+  state.rows = []; state.key = false; state.pendingJobKeys.clear(); el("csv-export").hidden = true;
   el("retry-upload").hidden = true;
   status("login-status", message);
 }
@@ -292,12 +293,13 @@ async function recognize() {
   if (!window.confirm("將這份 PDF 傳給 Google 辨識，可能使用你的 API 額度。確定送出？")) return;
   state.busy = true; refreshControls(); status("job-status", "正在建立辨識工作…");
   const documentId = state.selected;
-  state.jobKey = uuid();
+  const requestKey = state.pendingJobKeys.get(documentId) || uuid();
+  state.pendingJobKeys.set(documentId, requestKey);
   try {
     const job = await api("management/jobs", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({document_id: documentId, request_key: state.jobKey, scenario: "real"})});
+      body: JSON.stringify({document_id: documentId, request_key: requestKey, scenario: "real"})});
     state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)]; state.job = job;
-    state.jobKey = null; selectJob(job.id);
+    state.pendingJobKeys.delete(documentId); selectJob(job.id);
   } catch (error) { status("job-status", `送出狀態未確認：${safeError(error)}。先重新載入工作列表；不會自動重送付費請求。`, "unknown"); }
   finally { state.busy = false; refreshControls(); }
 }

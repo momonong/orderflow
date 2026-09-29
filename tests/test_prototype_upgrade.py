@@ -84,5 +84,69 @@ class PrototypeUpgradeChecks(unittest.TestCase):
                     upgrade.validate_upgraded_state(snapshot)
 
 
+    def test_rollback_stops_and_quiesces_before_typed_check_and_preserves_legacy_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            store = Store(state)
+            owner, _, _ = store.authenticate(None)
+            store.add_document(owner, str(uuid.uuid4()), b"old-pdf",
+                                     hashlib.sha256(b"old-pdf").hexdigest(), 1, 1,
+                                     "management")
+            events = []
+            def fake_run(*command, phase, cwd=None):
+                events.append(phase)
+                if phase == "rollback-stop-service":
+                    # A legacy write may finish after the new release was switched.
+                    store.add_document(owner, str(uuid.uuid4()), b"post-switch-legacy",
+                                       hashlib.sha256(b"post-switch-legacy").hexdigest(),
+                                       1, 1, "management")
+            original_check = upgrade.typed_writes_exist
+            def check_typed():
+                events.append("typed-check")
+                return original_check()
+            with patch.object(upgrade, "STATE", state), \
+                 patch.object(upgrade, "run", side_effect=fake_run), \
+                 patch.object(upgrade, "require_quiescent", side_effect=lambda: events.append("uid-quiescent")), \
+                 patch.object(upgrade, "typed_writes_exist", side_effect=check_typed), \
+                 patch.object(upgrade, "replace_current", side_effect=lambda commit: events.append("switch-old")), \
+                 patch.object(upgrade, "wait_app", side_effect=lambda expect_records: events.append("health-old")):
+                upgrade.recover_previous_release(switched=True)
+            self.assertEqual(events, ["rollback-stop-service", "uid-quiescent", "typed-check",
+                                      "switch-old", "rollback-start-service", "health-old"])
+            self.assertEqual(len(store.documents(owner, "management")), 2,
+                             "rollback must not restore the stale snapshot or erase post-switch legacy writes")
+
+    def test_typed_write_race_hard_stops_without_starting_old_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            store = Store(state)
+            owner, _, _ = store.authenticate(None)
+            events = []
+            def fake_run(*command, phase, cwd=None):
+                events.append(phase)
+                if phase == "rollback-stop-service":
+                    # A request accepted by the new runtime immediately before stop becomes durable.
+                    store.add_document(owner, str(uuid.uuid4()), b"post-switch-typed",
+                                       hashlib.sha256(b"post-switch-typed").hexdigest(),
+                                       1, 1, "management", "invoice")
+            original_check = upgrade.typed_writes_exist
+            def check_typed():
+                events.append("typed-check")
+                return original_check()
+            with patch.object(upgrade, "STATE", state), \
+                 patch.object(upgrade, "run", side_effect=fake_run), \
+                 patch.object(upgrade, "require_quiescent", side_effect=lambda: events.append("uid-quiescent")), \
+                 patch.object(upgrade, "typed_writes_exist", side_effect=check_typed), \
+                 patch.object(upgrade, "replace_current", side_effect=lambda commit: events.append("switch-old")), \
+                 patch.object(upgrade, "wait_app", side_effect=lambda expect_records: events.append("health-old")):
+                with self.assertRaisesRegex(RuntimeError, "fix forward"):
+                    upgrade.recover_previous_release(switched=True)
+            self.assertEqual(events, ["rollback-stop-service", "uid-quiescent", "typed-check"])
+            with patch.object(upgrade, "STATE", state):
+                self.assertTrue(original_check())
+            self.assertEqual(len(store.documents(owner, "management")), 1,
+                             "HARD STOP must retain the typed document and never start old runtime")
+
+
 if __name__ == "__main__":
     unittest.main()
