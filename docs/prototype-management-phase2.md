@@ -24,7 +24,10 @@
 - 後端管理辨識依 kind 擷取 `orderNo` 或 `invoiceNo`、`client`、`product`、`code`、`qty`、`unitPrice`、`amount`、`currency`、`date`、`incoterms`、數量單位。客戶角色必須按文件明確證據辨認；不能假設 `Company` 就是買方。缺值是 `null`，不補 USD、日期、客戶或零。品名特殊字元及內部空白保留。原 AI 工作結果不覆寫；人工確認資料另存。
 - 新 `management_record_sets` 每文件至多一組，持有 session、文件、來源工作、kind、修訂、穩定列 UUID、刪除墓碑及時間戳。只有同 session、同 kind 且成功的真實管理辨識工作可首次建立；`PUT /api/management/record-sets/{document_id}` 送完整列、預期修訂及來源工作，在交易內比較修訂。相同內容重送冪等；衝突回 409。`GET /api/management/bootstrap` 含已確認 record sets。刪列需使用者確認；從列表／統計排除，但保留原 PDF、AI 工作與稽核來源。被有效發票列連結的 PO 列不可直接刪除；需先解除連結。
 - 發票列可人工連結至同 session 的單一 PO 列；一個 PO 列可有多個發票列，不做比例分攤。可取消或更換連結，均受整組修訂保護。已知客戶、品號或數量單位有矛盾時拒絕連結；缺值時標示需人工核對。只有有效、未刪且已連結的發票列參與 PO 數量對照。未知或單位不可比時不計算差額；未連結發票仍進發票金額統計。
-- 數量及貨幣以有界十進位字串儲存／計算；未知為 `null`，日期嚴格 ISO 格式並驗證真實日曆日期。不同幣別不相加，缺金額不當零。CSV 匯出只含可見有效資料、保留中文與字元，對公式開頭做防護。
+- 數量及貨幣以有界十進位字串儲存／計算；未知為 `null`，日期輸入接受嚴格 `YYYY-MM-DD` 或明確年月日斜線 `YYYY/M/D`（也接受兩位月日），以真實日曆含閏年驗證；保存後統一為 ISO `YYYY-MM-DD`，原 AI 工作結果不改。模糊月／日／年及不存在日期拒絕。不同幣別不相加，缺金額不當零。CSV 匯出只含可見有效資料、保留中文與字元，對公式開頭做防護。
+
+保存前於管理頁列出最多 20 處「第幾筆／欄位／繁中原因及例子」，欄位旁也顯示文字提示，錯誤摘要可聚焦；後端 `RECORD_ROWS_INVALID` 保留原錯誤碼，額外回傳不含輸入原文的 `errors` 欄位定位。格式失敗不清除未存輸入或行 ID；網路、session 與修訂衝突分別提示。session 到期重新登入同一文件與來源後，該頁記憶體中的未存編修可還原供再次核對，並不自動重送。
+`deploy/upgrade-asus-date-validation.py` 是此修正的 ASUS code-only 升級閘門：釘選目前 `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a` runtime，要求無執行中辨識、停止後核對七張 SQLite 表及 raw PDF/SQLite 快照，確認新 HTML/JS/CSS 與匿名 API 後才回報成功。部署前仍須將合併後固定 commit 的封存與腳本雜湊另行核對；本文件中的修正候選不代表 ASUS 已更新。
 
 ## 驗證與部署邊界
 

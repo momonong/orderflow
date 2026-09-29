@@ -667,3 +667,15 @@ input[type=password],input[type=text],input[type=number],input[type=search] {
 #retry-upload {
   margin-top:8px
 }
+
+.record-errors {border:2px solid var(--red);border-radius:8px;background:var(--red-bg);padding:12px;margin:12px 0;color:var(--red)}
+.record-errors:focus {outline:3px solid var(--red);outline-offset:3px}
+.record-errors p {margin:0 0 8px;font-weight:650}
+.record-errors ul {margin:0;padding-left:22px}
+#record-errors .record-error-link {display:block;width:100%;border:0;background:transparent;color:inherit;
+  text-align:left;text-decoration:underline;padding:3px 0;white-space:normal;overflow-wrap:anywhere;
+  font-size:inherit;font-weight:inherit;cursor:pointer}
+#record-errors .record-error-link:hover {background:transparent}
+.record-grid [aria-invalid="true"] {border:2px solid var(--red)}
+.record-field-error {display:block;color:var(--red);font-size:12px;line-height:1.45;margin-top:4px}
+.record-field-error[hidden] {display:none}

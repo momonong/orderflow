@@ -8,6 +8,7 @@ for (const id of ['page-dashboard', 'page-upload', 'page-orders', 'page-invoices
   assert.match(html, new RegExp(`id="${id}"`));
 }
 assert.doesNotMatch(html, />缺貨<|>可用庫存<|>已出貨</);
+assert.match(html, /id="record-errors"[^>]*role="alert"[^>]*tabindex="-1"/);
 const elements = new Map();
 function makeElement() {
   return {textContent: '', innerHTML: '', value: '', dataset: {}, files: [], style: {},
@@ -15,7 +16,8 @@ function makeElement() {
     append(...items) {this.children.push(...items);},
     replaceChildren(...items) {this.children = items; this.textContent = '';},
     addEventListener(name, callback) {this.listeners[name] = callback;},
-    setAttribute(name, value) {this[name] = value;}};
+    setAttribute(name, value) {this[name] = value;},
+    focus() {this.focused = true;}, scrollIntoView() {this.scrolled = true;}};
 }
 function el(id) {if (!elements.has(id)) elements.set(id, makeElement()); return elements.get(id);}
 const context = vm.createContext({
@@ -26,6 +28,19 @@ const context = vm.createContext({
   AbortController, setTimeout, clearTimeout, Date, console,
 });
 vm.runInContext(source, context);
+for (const [input, expected] of [['2026/09/22', '2026-09-22'],
+  ['2026/9/2', '2026-09-02'], ['2024/2/29', '2024-02-29'],
+  ['2026-09-22', '2026-09-22'], [null, null]]) {
+  context.dateInput = input;
+  assert.equal(vm.runInContext('normalizeRecordDate(dateInput)', context), expected);
+}
+for (const [input, code] of [['09/10/2026', 'DATE_FORMAT'],
+  ['2026-9-22', 'DATE_FORMAT'], ['2026/2/29', 'DATE_INVALID'],
+  ['2026/02/30', 'DATE_INVALID'], ['0000/1/1', 'DATE_INVALID']]) {
+  context.dateInput = input;
+  assert.throws(() => vm.runInContext('normalizeRecordDate(dateInput)', context),
+    error => error === code);
+}
 const orderId = '10000000-0000-4000-8000-000000000001';
 const invoiceId = '20000000-0000-4000-8000-000000000001';
 const orderRowId = '30000000-0000-4000-8000-000000000001';
@@ -51,6 +66,7 @@ const snapshot = {documents:[{id:orderId, document_kind:'purchase_order', size:5
     kind:'invoice', rows:[invoice, secondInvoice], revision:1}], ai_key_configured:false};
 context.snapshot = snapshot;
 vm.runInContext('showWorkspace(snapshot)', context);
+const realApi = vm.runInContext('api', context);
 assert.match(el('metric-orders').textContent, /21 USD/);
 assert.match(el('metric-invoices').textContent, /6\.5 USD/);
 assert.match(el('metric-invoices').textContent, /1,200 KRW/);
@@ -127,5 +143,68 @@ context.api = async (path, options) => {
   await vm.runInContext('upload()', context);
   assert.equal(uploadKeys.length, 2);
   assert.equal(uploadKeys[0], uploadKeys[1], 'uncertain upload retries preserve request key');
-  console.log('six-page records, filters, save/delete, retry, totals, comparison and CSV: ok');
+  context.api = async () => {throw Error('invalid rows must be stopped before HTTP');};
+  vm.runInContext(`state.selected="${orderId}"; state.job=state.jobs[0];
+    state.rows=[{...state.recordSets.find(set => set.document_id === state.selected).rows[0],
+      id:"${orderRowId}", date:"2026/2/30", qty:"0", currency:"usd"},
+      {...state.recordSets.find(set => set.document_id === state.selected).rows[0],
+      id:"30000000-0000-4000-8000-000000000002", date:"09/10/2026", qty:"1"}];
+    state.dirty=true; editRecordRows()`, context);
+  const beforeRows = vm.runInContext('JSON.stringify(state.rows)', context);
+  await vm.runInContext('saveRecordSet()', context);
+  assert.equal(vm.runInContext('JSON.stringify(state.rows)', context), beforeRows);
+  assert.equal(vm.runInContext('state.recordIssues.length', context), 4);
+  assert.equal(el('record-errors').focused, true);
+  assert.equal(el('record-errors').scrolled, true);
+  assert.match(el('record-errors').children[0].textContent, /4 處/);
+  const dateNode = vm.runInContext(`recordFieldNodes.get("${orderRowId}|date")`, context);
+  assert.equal(dateNode.input['aria-invalid'], 'true');
+  assert.match(dateNode.hint.textContent, /日期不存在/);
+  assert.equal(dateNode.input.value, '2026/2/30');
+  dateNode.input.value = '2024/2/29'; dateNode.input.listeners.input();
+  assert.equal(vm.runInContext('state.recordIssues.length', context), 3);
+  vm.runInContext('state.rows[0].qty="2"; state.rows[0].currency="USD"; state.rows[1].date="2026/9/22"; editRecordRows()', context);
+  const keptIds = vm.runInContext('state.rows.map(row => row.id).join(",")', context);
+  let sent;
+  context.api = async (path, options) => {
+    sent = JSON.parse(options.body);
+    throw {code:'RECORD_ROWS_INVALID', errors:[{index:2, row_id:sent.rows[1].id, field:'date', code:'DATE_INVALID'}]};
+  };
+  await vm.runInContext('saveRecordSet()', context);
+  assert.equal(sent.rows[0].date, '2024-02-29');
+  assert.equal(sent.rows[1].date, '2026-09-22');
+  assert.equal(vm.runInContext('state.rows[0].date', context), '2024/2/29', 'server rejection keeps typed value');
+  assert.equal(vm.runInContext('state.rows.map(row => row.id).join(",")', context), keptIds);
+  assert.match(vm.runInContext('recordFieldNodes.get(state.rows[1].id+"|date").hint.textContent', context), /日期不存在/);
+  for (const code of ['RECORD_VERSION_CONFLICT', 'NETWORK_ERROR']) {
+    context.api = async () => {throw {code};};
+    await vm.runInContext('saveRecordSet()', context);
+    assert.equal(vm.runInContext('state.rows.map(row => row.id).join(",")', context), keptIds);
+    assert.equal(el('record-errors').hidden, true, `${code} cannot masquerade as a format error`);
+    assert.match(el('draft-status').textContent, /未存輸入仍保留/);
+  }
+  context.api = async (path, options) => {
+    const body = JSON.parse(options.body);
+    return {document_id:orderId, source_job_id:jobId, kind:'purchase_order',
+      rows:body.rows, revision:2};
+  };
+  await vm.runInContext('saveRecordSet()', context);
+  assert.equal(vm.runInContext('state.rows[0].date', context), '2024-02-29');
+  assert.equal(vm.runInContext('state.rows[1].date', context), '2026-09-22');
+  assert.equal(vm.runInContext('state.recordIssues.length', context), 0);
+  vm.runInContext('state.rows[0].date="2026/9/22"; state.dirty=true; editRecordRows()', context);
+  context.api = realApi;
+  context.fetch = async () => ({status:401, ok:false, headers:{get(name) {
+    return name === 'X-Orderflow-Origin' ? 'app' : 'application/json';
+  }}, json:async () => ({error_code:'SESSION_EXPIRED'})});
+  await vm.runInContext('saveRecordSet()', context);
+  assert.equal(el('login').hidden, false);
+  assert.equal(vm.runInContext('state.pendingRecordEdit.rows[0].date', context), '2026/9/22');
+  assert.equal(vm.runInContext('state.rows[0].date', context), '2026/9/22');
+  vm.runInContext('showWorkspace(snapshot)', context);
+  assert.equal(vm.runInContext('state.rows[0].date', context), '2026/9/22');
+  assert.equal(vm.runInContext('state.revision', context), 2);
+  assert.equal(vm.runInContext('state.dirty', context), true);
+  assert.equal(vm.runInContext('state.pendingRecordEdit', context), null);
+  console.log('six-page records, date validation, field errors, reauth preserved edits and CSV: ok');
 })().catch(error => {console.error(error); process.exitCode = 1;});

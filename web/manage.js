@@ -2,8 +2,8 @@
 const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
 const state = {documents: [], jobs: [], drafts: [], recordSets: [], key: false, selected: null,
-  job: null, rows: [], revision: 0, dirty: false, busy: false, uploadKey: null,
-  uploadFile: null, pendingFile: null, pendingKind: null,
+  job: null, rows: [], recordIssues: [], revision: 0, dirty: false, busy: false, uploadKey: null,
+  uploadFile: null, pendingFile: null, pendingKind: null, pendingRecordEdit: null,
   pendingJobKeys: new Map(), page: "dashboard"};
 let keyFieldUsed = false;
 let keyWorkspaceShown = false;
@@ -60,9 +60,17 @@ async function api(path, options = {}, timeoutMs = 10000) {
     catch { throw {code: "BAD_JSON_RESPONSE", status: response.status, appMarker,
       responseType: type === "text/html" ? "HTML" : type || "MISSING", requestId}; }
     if (!response.ok) {
-      if (response.status === 401 && path !== "login") showLogin("登入已過期，請重新登入。");
+      if (response.status === 401 && path !== "login") {
+        const recordSave = path.startsWith("management/record-sets/");
+        if (recordSave) state.pendingRecordEdit = {documentId: state.selected, jobId: state.job?.id,
+          revision: state.revision, rows: state.rows.map(row => ({...row}))};
+        const preserve = recordSave || !!state.pendingRecordEdit;
+        showLogin(preserve ? "登入已過期；未存品項暫留在此頁。請重新登入後核對再保存。"
+          : "登入已過期，請重新登入。", preserve);
+      }
       throw {code: typeof data.error_code === "string" && /^[A-Z0-9_]{2,40}$/.test(data.error_code)
         ? data.error_code : "HTTP_ERROR", status: response.status, appMarker, responseType: "JSON", requestId,
+        errors: Array.isArray(data.errors) ? data.errors : undefined,
         upstreamStatus: Number.isInteger(data.upstream_http_status) ? data.upstream_http_status : undefined,
         upstreamReason: ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"].includes(data.upstream_reason)
           ? data.upstream_reason : undefined};
@@ -74,19 +82,26 @@ async function api(path, options = {}, timeoutMs = 10000) {
     throw {code: "NETWORK_ERROR", requestId, unknown: true};
   } finally { clearTimeout(timer); }
 }
-function showLogin(message = "請輸入網站密碼。") {
+function showLogin(message = "請輸入網站密碼。", preserveEditor = false) {
   keyWorkspaceShown = false;
   el("startup").hidden = true; el("workspace").hidden = true; el("login").hidden = false;
   el("logout").hidden = true; el("password").value = ""; clearKeyInput();
-  state.documents = []; state.jobs = []; state.drafts = []; state.recordSets = [];
-  state.selected = null; state.job = null; state.pendingFile = null; state.pendingKind = null;
-  state.rows = []; state.key = false; state.pendingJobKeys.clear(); el("csv-export").hidden = true;
+  if (!preserveEditor) {
+    state.documents = []; state.jobs = []; state.drafts = []; state.recordSets = [];
+    state.selected = null; state.job = null; state.rows = []; state.pendingRecordEdit = null;
+  }
+  state.pendingFile = null; state.pendingKind = null; state.key = false;
+  state.pendingJobKeys.clear(); el("csv-export").hidden = true;
   el("retry-upload").hidden = true;
   status("login-status", message);
 }
 function showWorkspace(data) {
   state.documents = data.documents || []; state.jobs = data.jobs || [];
   state.drafts = data.drafts || []; state.recordSets = data.record_sets || [];
+  const pending = state.pendingRecordEdit;
+  const canRestore = pending && state.documents.some(doc => doc.id === pending.documentId) &&
+    state.jobs.some(job => job.id === pending.jobId && job.document_id === pending.documentId && job.state === "done");
+  if (canRestore) { state.selected = pending.documentId; state.job = null; }
   state.key = !!data.ai_key_configured;
   if (!keyWorkspaceShown) {
     clearKeyInput();
@@ -102,12 +117,21 @@ function showWorkspace(data) {
   if (state.selected && !state.documents.some(doc => doc.id === state.selected)) state.selected = null;
   if (!state.selected && state.documents.length) state.selected = state.documents[0].id;
   renderDocuments();
-  if (state.job) selectJob(state.job.id);
+  if (canRestore) selectJob(pending.jobId);
+  else if (state.job) selectJob(state.job.id);
   else {
     const saved = state.recordSets.find(item => item.document_id === state.selected);
     const latest = state.jobs.find(job => job.id === saved?.source_job_id)
       || state.jobs.find(job => job.document_id === state.selected);
     if (latest) selectJob(latest.id); else clearDraft();
+  }
+  if (canRestore) {
+    state.rows = pending.rows.map(row => ({...row})); state.revision = pending.revision;
+    state.dirty = true; state.pendingRecordEdit = null; editRecordRows();
+    status("draft-status", "重新登入後已還原未存品項；請核對修訂，版本若已變更會拒絕覆蓋。", "unknown");
+  } else if (pending) {
+    state.pendingRecordEdit = null;
+    status("draft-status", "重新登入後找不到原文件或辨識來源；沒有自動送出或覆蓋資料。", "error");
   }
   renderManagementViews();
   refreshControls();
@@ -117,7 +141,11 @@ async function load() {
   status("startup-status", "正在確認登入及資料狀態。");
   try { showWorkspace(await api("management/bootstrap")); }
   catch (error) {
-    if (error.status === 401) { showLogin(); return; }
+    if (error.status === 401) {
+      showLogin(state.pendingRecordEdit ? "登入仍未完成；未存品項暫留在此頁。" : "請輸入網站密碼。",
+        !!state.pendingRecordEdit);
+      return;
+    }
     status("startup-status", `載入失敗：${safeError(error)}。可重新載入。`, "error");
     el("retry").hidden = false;
   }
@@ -167,6 +195,7 @@ function clearDraft() {
   renderJobs(); refreshControls();
 }
 function editRows(rows) {
+  resetRecordIssues();
   state.rows = rows.map(row => ({description: row.description, quantity: row.quantity}));
   const target = el("rows"); target.replaceChildren();
   state.rows.forEach((row, index) => {
@@ -210,6 +239,7 @@ function selectJob(id) {
   refreshControls();
 }
 function clearDraftEditor() {
+  resetRecordIssues();
   state.rows = []; state.revision = 0; state.dirty = false; el("rows").replaceChildren();
   el("draft-source").textContent = "只有成功的管理辨識工作可建立草稿。";
   status("draft-status", "尚無可編修的草稿。"); refreshControls();
@@ -515,12 +545,153 @@ function selectTypedJob(job, kind) {
     : "請逐欄核對 AI 建議值後明確保存；未保存編修會消失。", saved ? "good" : "");
   refreshControls();
 }
+const recordLabels = {orderNo: "採購單號", invoiceNo: "發票號碼", client: "客戶", product: "品名",
+  code: "品號", qty: "數量", unit: "數量單位", unitPrice: "單價", amount: "金額",
+  currency: "幣別", date: "日期", incoterms: "貿易條件", status: "人工狀態",
+  linked_order_row_id: "人工連結採購單品項", id: "品項識別", deleted: "刪除狀態",
+  row: "品項", rows: "品項數"};
+const recordTextLimits = {orderNo: 100, invoiceNo: 100, client: 200, product: 200,
+  code: 100, currency: 3, date: 10, incoterms: 60, unit: 32};
+const recordFieldNodes = new Map();
+const recordErrorCodes = new Set(["ROW_COUNT", "ROW_FORMAT", "ROW_ID_DUPLICATE", "BOOLEAN_REQUIRED",
+  "TEXT_INVALID", "TEXT_TOO_LONG", "CURRENCY_FORMAT", "DATE_FORMAT", "DATE_INVALID",
+  "DECIMAL_FORMAT", "POSITIVE_REQUIRED", "FIELD_NOT_ALLOWED", "STATUS_INVALID",
+  "ROW_ID_INVALID", "PRODUCT_OR_CODE_REQUIRED"]);
+function recordIssueReason(issue) {
+  const reasons = {
+    ROW_COUNT: "請保留 1–100 筆品項。", ROW_FORMAT: "品項結構不正確，請重新載入後核對。",
+    ROW_ID_DUPLICATE: "品項識別重複，請重新載入後核對。",
+    BOOLEAN_REQUIRED: "刪除狀態不正確，請重新載入後核對。",
+    TEXT_INVALID: "請輸入非空白文字；未知時請留空。",
+    TEXT_TOO_LONG: `最多 ${recordTextLimits[issue.field] || 100} 字，請縮短內容。`,
+    CURRENCY_FORMAT: "請輸入 3 個大寫英文字母，例如 USD；未知請留空。",
+    DATE_FORMAT: "請輸入 YYYY-MM-DD 或 YYYY/M/D，例如 2026/9/22；不接受月/日/年。",
+    DATE_INVALID: "日期不存在，請核對年月日；例如 2024/2/29。",
+    DECIMAL_FORMAT: "請輸入最多 12 位整數、4 位小數的非負十進位數，例如 12.50；未知請留空。",
+    POSITIVE_REQUIRED: "數量須大於 0，例如 1；未知請留空。",
+    FIELD_NOT_ALLOWED: "這類文件不允許此欄位，請重新載入後核對。",
+    STATUS_INVALID: "請選擇「確認中」或「確定」。",
+    ROW_ID_INVALID: "連結的品項識別不正確，請重新選擇。",
+    PRODUCT_OR_CODE_REQUIRED: "品名與品號至少填一欄，例如品名「螺絲」。",
+  };
+  return reasons[issue.code] || "請檢查這個欄位。";
+}
+function normalizeRecordDate(value) {
+  if (value === null) return null;
+  const iso = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(value);
+  const slash = /^([0-9]{4})\/([0-9]{1,2})\/([0-9]{1,2})$/.exec(value);
+  const parts = iso || slash;
+  if (!parts) throw "DATE_FORMAT";
+  const year = Number(parts[1]), month = Number(parts[2]), day = Number(parts[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [0, 31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month]) throw "DATE_INVALID";
+  return iso ? value : `${parts[1]}-${parts[2].padStart(2, "0")}-${parts[3].padStart(2, "0")}`;
+}
+function collectRecordRows() {
+  const issues = [];
+  const add = (row, index, field, code) => {
+    if (issues.length < 20) issues.push({row_id: row?.id || null, index, field, code});
+  };
+  if (state.rows.length < 1 || state.rows.length > 100)
+    return {rows: [], issues: [{row_id: null, index: null, field: "rows", code: "ROW_COUNT"}]};
+  const ids = new Set();
+  const kind = selectedDocumentKind();
+  const validRowId = value => typeof value === "string" &&
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value);
+  const rows = state.rows.map((original, offset) => {
+    const index = offset + 1, row = {...original};
+    if (!validRowId(row.id)) add(row, index, "row", "ROW_FORMAT");
+    else if (ids.has(row.id)) add(row, index, "id", "ROW_ID_DUPLICATE");
+    ids.add(row.id);
+    if (typeof row.deleted !== "boolean") add(row, index, "deleted", "BOOLEAN_REQUIRED");
+    for (const [field, limit] of Object.entries(recordTextLimits)) {
+      const value = row[field];
+      if (value === null) continue;
+      if (typeof value !== "string" || !value.trim() || value.includes("\0")) add(row, index, field, "TEXT_INVALID");
+      else if (value.length > limit) add(row, index, field, "TEXT_TOO_LONG");
+    }
+    if (typeof row.currency === "string" && row.currency.trim() && row.currency.length <= 3 && !/^[A-Z]{3}$/.test(row.currency))
+      add(row, index, "currency", "CURRENCY_FORMAT");
+    if (typeof row.date === "string" && row.date.trim() && row.date.length <= 10) {
+      try { row.date = normalizeRecordDate(row.date); }
+      catch (code) { add(row, index, "date", code); }
+    }
+    for (const field of ["qty", "unitPrice", "amount"]) {
+      const value = row[field];
+      if (value === null) continue;
+      if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,4})?$/.test(value))
+        add(row, index, field, "DECIMAL_FORMAT");
+      else if (field === "qty" && Number(value) <= 0) add(row, index, field, "POSITIVE_REQUIRED");
+    }
+    if (!row.deleted && row.product === null && row.code === null)
+      add(row, index, "product", "PRODUCT_OR_CODE_REQUIRED");
+    if (kind === "purchase_order") {
+      if (row.invoiceNo !== null) add(row, index, "invoiceNo", "FIELD_NOT_ALLOWED");
+      if (row.linked_order_row_id !== null) add(row, index, "linked_order_row_id", "FIELD_NOT_ALLOWED");
+      if (!["確認中", "確定"].includes(row.status)) add(row, index, "status", "STATUS_INVALID");
+    } else {
+      if (row.orderNo !== null) add(row, index, "orderNo", "FIELD_NOT_ALLOWED");
+      if (row.status !== null) add(row, index, "status", "FIELD_NOT_ALLOWED");
+      if (row.linked_order_row_id !== null && !validRowId(row.linked_order_row_id))
+        add(row, index, "linked_order_row_id", "ROW_ID_INVALID");
+    }
+    return row;
+  });
+  return {rows, issues};
+}
+function recordIssuesFromApi(errors) {
+  if (!Array.isArray(errors)) return [];
+  return errors.slice(0, 20).filter(issue => issue && Number.isInteger(issue.index) &&
+    issue.index >= 1 && issue.index <= state.rows.length &&
+    Object.hasOwn(recordLabels, issue.field) && recordErrorCodes.has(issue.code))
+    .map(issue => ({index: issue.index, row_id: state.rows[issue.index - 1].id,
+      field: issue.field, code: issue.code}));
+}
+function renderRecordIssues(issues, focus = false) {
+  const summary = el("record-errors");
+  for (const {input, hint} of recordFieldNodes.values()) {
+    input.setAttribute("aria-invalid", "false"); input.setAttribute("aria-describedby", "");
+    hint.textContent = ""; hint.hidden = true;
+  }
+  summary.replaceChildren(); summary.hidden = !issues.length;
+  if (!issues.length) return;
+  const title = document.createElement("p");
+  title.textContent = `請修正以下 ${issues.length} 處後再保存；目前輸入仍保留。`;
+  summary.append(title);
+  const list = document.createElement("ul");
+  issues.forEach(issue => {
+    const label = issue.index ? `第 ${issue.index} 筆 · ${recordLabels[issue.field] || "品項"}` : "品項數";
+    const message = `${label}：${recordIssueReason(issue)}`;
+    const item = document.createElement("li");
+    const node = recordFieldNodes.get(`${issue.row_id}|${issue.field}`);
+    if (node) {
+      node.input.setAttribute("aria-invalid", "true");
+      node.input.setAttribute("aria-describedby", node.hint.id);
+      node.hint.textContent = recordIssueReason(issue); node.hint.hidden = false;
+      const button = document.createElement("button"); button.type = "button";
+      button.className = "record-error-link"; button.textContent = message;
+      button.addEventListener("click", () => node.input.focus()); item.append(button);
+    } else item.textContent = message;
+    list.append(item);
+  });
+  summary.append(list);
+  if (focus) { summary.focus({preventScroll: true}); summary.scrollIntoView({block: "nearest"}); }
+}
+function clearRecordIssue(rowId, field) {
+  const issues = state.recordIssues.filter(issue => !(issue.row_id === rowId && issue.field === field));
+  if (issues.length !== state.recordIssues.length) {
+    state.recordIssues = issues; renderRecordIssues(issues);
+  }
+}
+function resetRecordIssues() {
+  recordFieldNodes.clear(); state.recordIssues = []; renderRecordIssues([]);
+}
 function editRecordRows() {
   const kind = selectedDocumentKind();
   const target = el("rows"); target.replaceChildren();
-  const labels = {orderNo: "採購單號", invoiceNo: "發票號碼", client: "客戶", product: "品名",
-    code: "品號", qty: "數量", unit: "數量單位", unitPrice: "單價", amount: "金額",
-    currency: "幣別（3 字母）", date: "日期（YYYY-MM-DD）", incoterms: "貿易條件"};
+  resetRecordIssues();
+  const labels = {...recordLabels, date: "日期（YYYY-MM-DD 或 YYYY/M/D）", currency: "幣別（3 大寫字母）"};
   const fields = kind === "purchase_order"
     ? ["orderNo", "client", "product", "code", "qty", "unit", "unitPrice", "amount", "currency", "date", "incoterms"]
     : ["invoiceNo", "client", "product", "code", "qty", "unit", "unitPrice", "amount", "currency", "date", "incoterms"];
@@ -532,9 +703,13 @@ function editRecordRows() {
     fields.forEach(field => {
       const label = document.createElement("label"); label.textContent = labels[field];
       const input = document.createElement("input"); input.type = "text";
-      input.value = row[field] ?? ""; input.maxLength = field === "product" || field === "client" ? 200 : 100;
-      input.addEventListener("input", () => { row[field] = input.value === "" ? null : input.value; markDirty(); });
-      label.append(input); grid.append(label);
+      input.value = row[field] ?? ""; input.maxLength = recordTextLimits[field] || 17;
+      input.addEventListener("input", () => { row[field] = input.value === "" ? null : input.value;
+        clearRecordIssue(row.id, field); markDirty(); });
+      const hint = document.createElement("span"); hint.id = `record-error-${row.id}-${field}`;
+      hint.className = "record-field-error"; hint.hidden = true;
+      recordFieldNodes.set(`${row.id}|${field}`, {input, hint});
+      label.append(input, hint); grid.append(label);
     });
     if (kind === "purchase_order") {
       const label = document.createElement("label"); label.textContent = "人工狀態";
@@ -544,8 +719,12 @@ function editRecordRows() {
         option.textContent = statusValue; select.append(option);
       }
       select.value = row.status || "確認中";
-      select.addEventListener("change", () => { row.status = select.value; markDirty(); });
-      label.append(select); grid.append(label);
+      select.addEventListener("change", () => { row.status = select.value;
+        clearRecordIssue(row.id, "status"); markDirty(); });
+      const hint = document.createElement("span"); hint.id = `record-error-${row.id}-status`;
+      hint.className = "record-field-error"; hint.hidden = true;
+      recordFieldNodes.set(`${row.id}|status`, {input: select, hint});
+      label.append(select, hint); grid.append(label);
     } else {
       const label = document.createElement("label"); label.textContent = "人工連結採購單品項";
       const select = document.createElement("select");
@@ -562,11 +741,15 @@ function editRecordRows() {
           .find(item => item.row.id === select.value)?.row : null;
         const issue = select.value ? linkIssue(row, linked) : null;
         if (issue) { select.value = row.linked_order_row_id || ""; showToast(issue, "error"); return; }
-        row.linked_order_row_id = select.value || null; markDirty();
+        row.linked_order_row_id = select.value || null;
+        clearRecordIssue(row.id, "linked_order_row_id"); markDirty();
         if (linked && ["client", "code", "unit"].some(key => !row[key] || !linked[key]))
           showToast("連結欄位有缺值；請人工核對客戶、品號與數量單位。", "");
       });
-      label.append(select); grid.append(label);
+      const hint = document.createElement("span"); hint.id = `record-error-${row.id}-linked_order_row_id`;
+      hint.className = "record-field-error"; hint.hidden = true;
+      recordFieldNodes.set(`${row.id}|linked_order_row_id`, {input: select, hint});
+      label.append(select, hint); grid.append(label);
       const note = document.createElement("p"); note.className = "muted";
       note.textContent = "只有人工連結且數量單位可比的發票品項會進訂購／開票數量對照。";
       wrap.append(note);
@@ -588,7 +771,7 @@ function recordError(error) {
     RECORD_LINK_CONFLICT: "客戶、品號或數量單位與所連結採購單不同；請修正或取消連結。",
     RECORD_LINK_NOT_FOUND: "連結的採購單品項不存在或已刪除；請重新選擇。",
     RECORD_LINKED_ROW: "此採購單品項仍被發票連結；請先在發票取消連結。",
-    RECORD_ROWS_INVALID: "請檢查品名／品號、十進位數量與金額、幣別和真實日期；缺值可保持空白。",
+    RECORD_ROWS_INVALID: "品項資料有誤；請核對各欄提示。若未顯示欄位提示，請重新載入後核對。",
     RECORD_SOURCE_NOT_FOUND: "來源辨識工作不可用；需同一登入工作區的成功管理辨識。",
     RECORD_ROW_ID_CONFLICT: "記錄品項識別與其他文件衝突，請重新載入。",
   };
@@ -596,11 +779,18 @@ function recordError(error) {
 }
 async function saveRecordSet() {
   if (!state.job || state.job.state !== "done" || state.busy) return;
+  const checked = collectRecordRows();
+  if (checked.issues.length) {
+    state.recordIssues = checked.issues; renderRecordIssues(checked.issues, true);
+    status("draft-status", `保存前找到 ${checked.issues.length} 處欄位問題；輸入未清除。`, "error");
+    return;
+  }
+  state.recordIssues = []; renderRecordIssues([]);
   state.busy = true; refreshControls(); status("draft-status", "正在保存人工確認的記錄…");
   try {
     const record = await api(`management/record-sets/${state.selected}`, {
       method: "PUT", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({source_job_id: state.job.id, revision: state.revision, rows: state.rows}),
+      body: JSON.stringify({source_job_id: state.job.id, revision: state.revision, rows: checked.rows}),
     });
     state.recordSets = [record, ...state.recordSets.filter(item => item.document_id !== record.document_id)];
     state.revision = record.revision; state.rows = record.rows.map(row => ({...row})); state.dirty = false;
@@ -609,7 +799,9 @@ async function saveRecordSet() {
     showPage(record.kind === "purchase_order" ? "orders" : "invoices");
     showToast("人工確認記錄已保存", "good");
   } catch (error) {
-    status("draft-status", `保存失敗：${recordError(error)}`, "error");
+    const issues = error.code === "RECORD_ROWS_INVALID" ? recordIssuesFromApi(error.errors) : [];
+    if (issues.length) { state.recordIssues = issues; renderRecordIssues(issues, true); }
+    status("draft-status", `保存失敗：${recordError(error)}；未存輸入仍保留。`, "error");
   } finally { state.busy = false; refreshControls(); }
 }
 async function deleteRecordRow(documentId, rowId, kind) {

@@ -566,6 +566,42 @@ class PublicAiTests(unittest.TestCase):
         self.assertIn("HTTP bootstrap to UI lists", checked.stdout)
 
 
+    def test_record_api_returns_safe_field_locations_and_preserves_session_scope(self):
+        owner = self.store.session(self.cookie.split("=", 1)[1])
+        document = self.store.add_document(owner, str(uuid.uuid4()), PDF,
+                                           hashlib.sha256(PDF).hexdigest(), 1, 1,
+                                           "management", "invoice")
+        job, _ = self.store.add_job(owner, document["id"], str(uuid.uuid4()),
+                                    "real", "management")
+        self.store.set_job(job["id"], state="done", result=[{"date": "2026/9/22"}])
+        item = {"id": str(uuid.uuid4()), "orderNo": None, "invoiceNo": "INV-1",
+                "client": None, "product": "Synthetic", "code": None, "qty": "0",
+                "unitPrice": None, "amount": None, "currency": "usd", "date": "2026/2/30",
+                "incoterms": None, "unit": None, "status": None,
+                "linked_order_row_id": None, "deleted": False}
+        path = "/orderflow/api/management/record-sets/" + document["id"]
+        body = {"source_job_id": job["id"], "revision": 0, "rows": [item]}
+        status, response, _ = self.request("PUT", path, json.dumps(body),
+                                           {"Content-Type": "application/json"}, self.cookie)
+        self.assertEqual((status, response["error_code"]), (400, "RECORD_ROWS_INVALID"))
+        self.assertEqual({error["field"] for error in response["errors"]},
+                         {"qty", "currency", "date"})
+        self.assertTrue(all(error["index"] == 1 and error["row_id"] == item["id"]
+                            for error in response["errors"]))
+        self.assertNotIn("2026/2/30", json.dumps(response))
+        self.assertIsNone(self.store.record_set(owner, document["id"]))
+        item.update(qty="1", currency="USD", date="2026/9/22")
+        status, saved, _ = self.request("PUT", path, json.dumps(body),
+                                        {"Content-Type": "application/json"}, self.cookie)
+        self.assertEqual(status, 201)
+        self.assertEqual(saved["rows"][0]["date"], "2026-09-22")
+        self.assertEqual(self.store.job(owner, job["id"], "management")["result"],
+                         [{"date": "2026/9/22"}])
+        status, response, _ = self.request("PUT", path, json.dumps(body),
+                                           {"Content-Type": "application/json"}, None)
+        self.assertEqual(status, 401)
+        self.assertNotIn("errors", response)
+
 class GeminiAdapterTests(unittest.TestCase):
     def test_pdf_request_fixed_model_header_and_schema(self):
         seen = {}
