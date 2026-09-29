@@ -27,7 +27,7 @@
 - 數量及貨幣以有界十進位字串儲存／計算；未知為 `null`，日期輸入接受嚴格 `YYYY-MM-DD` 或明確年月日斜線 `YYYY/M/D`（也接受兩位月日），以真實日曆含閏年驗證；保存後統一為 ISO `YYYY-MM-DD`，原 AI 工作結果不改。模糊月／日／年及不存在日期拒絕。不同幣別不相加，缺金額不當零。CSV 匯出只含可見有效資料、保留中文與字元，對公式開頭做防護。
 
 保存前於管理頁列出最多 20 處「第幾筆／欄位／繁中原因及例子」，欄位旁也顯示文字提示，錯誤摘要可聚焦；後端 `RECORD_ROWS_INVALID` 保留原錯誤碼，額外回傳不含輸入原文的 `errors` 欄位定位。格式失敗不清除未存輸入或行 ID；網路、session 與修訂衝突分別提示。session 到期重新登入同一文件與來源後，該頁記憶體中的未存編修可還原供再次核對，並不自動重送。送出期間仍新增的編修不被較早成功回應覆蓋；保存進行中不可透過列表切換文件或辨識工作。
-`deploy/upgrade-asus-date-validation.py` 是此修正的 ASUS code-only 升級閘門：釘選目前 `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a` runtime，要求無執行中辨識、停止後核對七張 SQLite 表及 raw PDF/SQLite 快照，確認新 HTML/JS/CSS 與匿名 API 後才回報成功。部署前仍須將合併後固定 commit 的封存與腳本雜湊另行核對；本文件中的修正候選不代表 ASUS 已更新。
+`deploy/upgrade-asus-date-validation.py` 是此修正的 ASUS code-only 升級閘門：釘選目前 `ee41445565a73ea7e0b3444f0bb1bfad5e6ddd2a` runtime，要求無執行中辨識、停止後核對七張 SQLite 表及 raw PDF/SQLite 快照，確認新 HTML/JS/CSS 與匿名 API 後才回報成功。部署時已核對固定 commit 封存與腳本雜湊；2026-09-29 使用者回報 gate `PASS`，獨立唯讀核對 ASUS runtime 為 `37a404fcea6331b3be984fdfc9e3756c56cc54bd`，細節與限制見 [ASUS 部署紀錄](asus-deployment-2026-09-28.md)。
 
 ## 驗證與部署邊界
 
