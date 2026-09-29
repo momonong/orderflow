@@ -4,6 +4,34 @@ const el = id => document.getElementById(id);
 const state = {documents: [], jobs: [], drafts: [], key: false, selected: null,
   job: null, rows: [], revision: 0, dirty: false, busy: false, uploadKey: null,
   uploadFile: null, jobKey: null};
+let keyFieldUsed = false;
+let keyWorkspaceShown = false;
+function clearKeyInput() {
+  const field = el("ai-key");
+  field.value = "";
+  field.readOnly = true;
+  keyFieldUsed = false;
+}
+function prepareKeyInput() {
+  clearKeyInput();
+  const field = el("ai-key");
+  field.addEventListener("focus", () => {
+    if (field.readOnly) {
+      field.value = "";
+      field.readOnly = false;
+    }
+  });
+  field.addEventListener("input", () => { keyFieldUsed = true; });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && !keyFieldUsed) clearKeyInput();
+  });
+}
+function keyInputError(value) {
+  if (!value) return "請先貼上 Google AI Studio API key；不要輸入網站密碼。";
+  if (value.length > 256 || /[^\x21-\x7e]/.test(value) || value.includes("://") || /^www\./i.test(value))
+    return "這看起來不是單一 API key。請勿貼網址、空白或網站密碼；請從 AI Studio 重新複製。";
+  return null;
+}
 const uuid = () => crypto.randomUUID();
 function status(id, message, kind = "") { el(id).textContent = message; el(id).dataset.state = kind; }
 function safeError(error) {
@@ -46,17 +74,24 @@ async function api(path, options = {}, timeoutMs = 10000) {
   } finally { clearTimeout(timer); }
 }
 function showLogin(message = "請輸入網站密碼。") {
+  keyWorkspaceShown = false;
   el("startup").hidden = true; el("workspace").hidden = true; el("login").hidden = false;
-  el("logout").hidden = true; el("password").value = ""; el("ai-key").value = "";
+  el("logout").hidden = true; el("password").value = ""; clearKeyInput();
   state.documents = []; state.jobs = []; state.drafts = []; state.selected = null; state.job = null;
   state.rows = []; state.key = false; status("login-status", message);
 }
 function showWorkspace(data) {
   state.documents = data.documents || []; state.jobs = data.jobs || []; state.drafts = data.drafts || [];
   state.key = !!data.ai_key_configured;
+  if (!keyWorkspaceShown) {
+    clearKeyInput();
+    keyWorkspaceShown = true;
+  }
   el("startup").hidden = true; el("login").hidden = true; el("workspace").hidden = false;
   el("logout").hidden = false;
-  status("key-status", state.key ? "金鑰已設定，可明確啟動辨識。" : "尚未設定金鑰。", state.key ? "good" : "");
+  status("key-status", state.key
+    ? "金鑰已暫存，欄位不回填。輸入形式不代表有效；可至診斷測試頁明確執行文字連線檢查。"
+    : "尚未設定金鑰。", state.key ? "good" : "");
   if (state.selected && !state.documents.some(doc => doc.id === state.selected)) state.selected = null;
   if (!state.selected && state.documents.length) state.selected = state.documents[0].id;
   renderDocuments();
@@ -200,11 +235,15 @@ async function upload() {
   finally { state.busy = false; refreshControls(); }
 }
 async function setKey() {
-  const key = el("ai-key").value; el("ai-key").value = "";
+  const key = el("ai-key").value;
+  const issue = keyInputError(key);
+  if (issue) { status("key-status", issue, "error"); return; }
   try { await api("key", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({key})});
-    state.key = true; status("key-status", "金鑰已設定，15 分鐘後失效。", "good"); }
-  catch (error) { status("key-status", `設定失敗：${safeError(error)}`, "error"); }
-  refreshControls();
+    state.key = true; status("key-status", "金鑰已暫存，15 分鐘後失效。格式不代表有效；可至診斷測試頁明確執行文字連線檢查。", "good"); }
+  catch (error) { status("key-status", error.code === "BAD_KEY"
+    ? "輸入形式不符。請從 AI Studio 複製單一金鑰，勿貼網站密碼或網址。"
+    : `設定失敗：${safeError(error)}`, "error"); }
+  finally { clearKeyInput(); refreshControls(); }
 }
 async function clearKey() {
   try { await api("key", {method: "DELETE"}); state.key = false; status("key-status", "金鑰已清除。"); }
@@ -248,6 +287,7 @@ async function saveDraft() {
   } catch (error) { status("draft-status", `儲存未完成：${safeError(error)}。若為版本衝突，先重新載入核對。`, "error"); }
   finally { state.busy = false; refreshControls(); }
 }
+prepareKeyInput();
 el("login-form").addEventListener("submit", login);
 el("retry").addEventListener("click", load);
 el("logout").addEventListener("click", async () => {

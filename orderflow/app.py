@@ -74,6 +74,14 @@ def audit_event(event: str, reference: str, phase: str,
           file=sys.stderr, flush=True)
 
 
+def plausible_key_input(value: object) -> bool:
+    # A local shape check only; Google decides whether a key is valid and authorized.
+    # Header transport requires a single printable ASCII value, with no pasted URL.
+    return (isinstance(value, str) and 1 <= len(value) <= 256
+            and all(33 <= ord(char) <= 126 for char in value)
+            and "://" not in value and not value.lower().startswith("www."))
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -870,8 +878,7 @@ class Handler(BaseHTTPRequestHandler):
             if value is None:
                 return
             key = value.get("key")
-            if (not isinstance(key, str) or not 20 <= len(key) <= 256
-                    or any(ord(char) < 33 or ord(char) > 126 for char in key)):
+            if not plausible_key_input(key):
                 self.error(400, "BAD_KEY")
                 return
             if not self.server.set_key(session_id, key):

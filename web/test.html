@@ -26,7 +26,7 @@
       <p>請使用提供連結的人交給你的網站密碼。這組密碼只用於登入網站，與 Google AI Studio API key 不同。</p>
       <form id="login-form">
         <label for="login-password">網站密碼</label>
-        <input id="login-password" type="password" autocomplete="current-password" required>
+        <input id="login-password" name="site-login-password" type="password" autocomplete="current-password" required>
         <button id="login-button" type="submit">登入網站</button>
       </form>
       <p id="login-status" class="status" role="status">請輸入網站密碼。</p>
@@ -70,9 +70,9 @@
       <div class="table-wrap"><table><thead><tr><th>品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
       <div class="real-ai">
         <h3>若要測真正的 PDF 辨識</h3>
-        <p>先設定你自己的 Google AI Studio API key。金鑰只暫存在這台網站主機的記憶體，15 分鐘後失效；不會寫入報告或資料庫。重新啟動後需重新輸入。</p>
+        <p id="key-help"><strong>Google AI Studio API key 不是網站密碼。</strong>請從 AI Studio 複製金鑰。金鑰只暫存在網站主機記憶體，15 分鐘後失效；不會寫入報告或資料庫。輸入形式通過不代表有效；文字連線檢查可確認權限與額度，可能使用 API 額度。</p>
         <label for="ai-key">Google AI Studio API key</label>
-        <input id="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="貼上 API key">
+        <input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly>
         <button id="save-key" type="button">設定金鑰</button>
         <button id="clear-key" type="button" disabled>清除金鑰</button>
         <p id="key-status" class="status" role="status">尚未設定金鑰；仍可使用上方模擬測試。</p>

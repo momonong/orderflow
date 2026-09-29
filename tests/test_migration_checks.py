@@ -21,6 +21,45 @@ PDF = b"%PDF-1.4\nsynthetic migration checksum fixture\n%%EOF\n"
 
 
 class MigrationChecksTests(unittest.TestCase):
+    def test_key_input_upgrade_accepts_existing_management_data_and_detects_loss(self):
+        upgrade = runpy.run_path(str(Path(__file__).resolve().parents[1]
+                                     / "deploy/upgrade-asus-key-input.py"))
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "state"
+            store = Store(state)
+            owner, _, _ = store.authenticate(None)
+            document = store.add_document(owner, str(uuid.uuid4()), PDF,
+                                          hashlib.sha256(PDF).hexdigest(), 1, 1, "management")
+            job, _ = store.add_job(owner, document["id"], str(uuid.uuid4()), "real", "management")
+            store.set_job(job["id"], state="done", result=[{"description": "fixture", "quantity": 1}])
+            draft, _ = store.save_management_draft(owner, job["id"],
+                                                   [{"description": "fixture", "quantity": 1}], 0)
+            snapshot = Path(root) / "snapshot.sqlite3"
+            with sqlite3.connect(store.db_path) as live, sqlite3.connect(snapshot) as saved:
+                live.backup(saved)
+            validate = upgrade["validate_unchanged_state"]
+            with patch.dict(validate.__globals__, {"STATE": state}):
+                validate(snapshot)
+                with store.db() as db:
+                    db.execute("DELETE FROM management_drafts WHERE id=?", (draft["id"],))
+                with self.assertRaisesRegex(RuntimeError, "management_drafts row count changed"):
+                    validate(snapshot)
+
+    def test_key_input_rollback_stops_before_switch(self):
+        recover = runpy.run_path(str(Path(__file__).resolve().parents[1]
+                                   / "deploy/upgrade-asus-key-input.py"))["recover_previous_release"]
+        events = []
+        def fake_run(*command, phase, cwd=None): events.append(phase)
+        with patch.dict(recover.__globals__, {
+            "run": fake_run,
+            "require_quiescent": lambda: events.append("quiescent"),
+            "replace_current": lambda commit: events.append("replace-current"),
+            "wait_app": lambda: events.append("new-health"),
+        }):
+            recover(True)
+        self.assertEqual(events, ["rollback-stop-service", "quiescent", "replace-current",
+                                  "rollback-start-service", "new-health"])
+
     def test_rollback_stops_before_write_check_and_keeps_all_live_rows(self):
         deploy_dir = Path(__file__).resolve().parents[1] / "deploy"
         recover = runpy.run_path(str(deploy_dir / "upgrade-asus-management.py"))["recover_previous_release"]

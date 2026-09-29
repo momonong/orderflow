@@ -25,7 +25,7 @@
       </section>
       <section id="login" class="card" hidden>
         <h2>登入網站</h2><p>輸入網站密碼。Google AI Studio 金鑰會在登入後另外設定。</p>
-        <form id="login-form"><label for="password">網站密碼</label><input id="password" type="password" autocomplete="current-password" required><button id="login-button">登入</button></form>
+        <form id="login-form"><label for="password">網站密碼</label><input id="password" name="site-login-password" type="password" autocomplete="current-password" required><button id="login-button">登入</button></form>
         <p id="login-status" class="status" role="status"></p>
       </section>
       <div id="workspace" hidden>
@@ -57,8 +57,8 @@
           <aside class="side-column">
             <section class="card" aria-labelledby="key-title">
               <h2 id="key-title">Google AI 金鑰</h2>
-              <p>金鑰僅保存在網站主機記憶體，15 分鐘後失效；重新啟動也會清除。</p>
-              <label for="ai-key">API key</label><input id="ai-key" type="password" autocomplete="off" spellcheck="false">
+              <p id="key-help"><strong>Google AI Studio API key 不是網站密碼。</strong>請從 AI Studio 複製金鑰；金鑰僅在網站主機記憶體保存 15 分鐘，重啟後清除。輸入形式通過不代表金鑰有效，權限及額度可到診斷測試頁明確執行文字連線檢查。</p>
+              <label for="ai-key">Google AI Studio API key</label><input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly>
               <div class="actions"><button id="set-key" type="button">設定金鑰</button><button id="clear-key" class="quiet" type="button">清除</button></div>
               <p id="key-status" class="status" role="status">尚未設定。</p>
             </section>

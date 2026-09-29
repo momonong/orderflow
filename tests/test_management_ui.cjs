@@ -18,12 +18,15 @@ function makeElement() {
 function el(id) {if (!elements.has(id)) elements.set(id, makeElement()); return elements.get(id);}
 const context = vm.createContext({
   document: {getElementById: el, createElement: makeElement},
-  window: {confirm: () => false},
+  window: {confirm: () => false, listeners: {}, addEventListener(name, handler) {this.listeners[name] = handler;}},
   crypto: {randomUUID: () => '00000000-0000-4000-8000-000000000000'},
   fetch: async () => { throw Error('Unexpected network request'); },
   AbortController, setTimeout, clearTimeout, Date, console,
 });
+el('ai-key').value = 'synthetic-browser-fill';
 vm.runInContext(source, context);
+assert.equal(el('ai-key').value, '');
+assert.equal(el('ai-key').readOnly, true);
 const docId = '11111111-1111-4111-8111-111111111111';
 const jobId = '22222222-2222-4222-8222-222222222222';
 const doc = {id: docId, size: 431, page_count: 1, created_ms: 1};
@@ -31,6 +34,27 @@ const job = {id: jobId, document_id: docId, state: 'done', scenario: 'real',
   result: [{description: '來源品項', quantity: 2}], created_ms: 2};
 const snapshot = {documents: [doc], jobs: [job], drafts: [], ai_key_configured: true};
 vm.runInContext('showWorkspace(snapshot)', Object.assign(context, {snapshot}));
+assert.equal(el('ai-key').value, '');
+el('ai-key').value = 'synthetic-late-fill';
+context.window.listeners.pageshow({persisted: true});
+assert.equal(el('ai-key').value, '');
+el('ai-key').listeners.focus();
+assert.equal(el('ai-key').readOnly, false);
+el('ai-key').value = 'opaqueA12!';
+el('ai-key').listeners.input();
+vm.runInContext('showWorkspace(snapshot)', context);
+context.window.listeners.pageshow({persisted: true});
+assert.equal(el('ai-key').value, 'opaqueA12!', 'normal entered key survives subsequent refresh');
+vm.runInContext('showLogin()', context);
+el('ai-key').value = 'synthetic-relogin-fill';
+vm.runInContext('showWorkspace(snapshot)', context);
+assert.equal(el('ai-key').value, '', 'relogin reveal clears browser-provided key value');
+for (const invalid of ['', 'https://aistudio.google.com/apikey', 'has space', 'a\n']) {
+  context.syntheticKey = invalid;
+  assert.equal(typeof vm.runInContext('keyInputError(syntheticKey)', context), 'string');
+}
+context.syntheticKey = 'opaqueA12!';
+assert.equal(vm.runInContext('keyInputError(syntheticKey)', context), null);
 assert.equal(el('save-draft').disabled, false, 'unchanged AI rows still require an explicit Save');
 assert.equal(el('draft-status').textContent.includes('未儲存'), true);
 context.api = async (path, options) => {
@@ -43,6 +67,10 @@ context.api = async (path, options) => {
   throw Error(`unexpected ${path}`);
 };
 (async () => {
+  el('ai-key').value = 'https://aistudio.google.com/apikey';
+  await vm.runInContext('setKey()', context);
+  assert.deepEqual(calls, [], 'invalid key must not call API');
+  assert.doesNotMatch(el('key-status').textContent, /aistudio\.google\.com/);
   await vm.runInContext('saveDraft()', context);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'PUT');

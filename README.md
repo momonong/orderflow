@@ -20,13 +20,13 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 3. 可先按「模擬測試」檢查畫面；如需真正辨識，設定自己的 AI Studio key，可先做文字連線檢查，再另外確認把 PDF 送給 Google。文字成功不代表 PDF 辨識成功。
 4. 核對辨識品項並複製診斷報告。報告不含 API key、PDF 內容、檔名或辨識品項。
 
-金鑰只保存在單一服務程序的記憶體，設定 15 分鐘後失效；清除或程序重啟後需重新輸入。已開始的 Google 請求不能撤回；結果不明時不自動重送。session cookie 為隨機秘密，資料庫只保存其雜湊；金鑰不寫入資料庫、cookie、報告或日誌。網站登入有效期 8 小時；登出會換成無權限 cookie，重新登入同一瀏覽器可取回該 session 的文件與工作。清除 cookie 或更換瀏覽器不保證取回。這是單一共用測試帳號，不是正式多使用者授權。
+金鑰只保存在單一服務程序的記憶體，設定 15 分鐘後失效；清除或程序重啟後需重新輸入。Google AI Studio API key 與網站登入密碼不同；兩個欄位分開，金鑰欄位初次顯示時清空，返回頁面時也會清除未主動輸入的內容；使用者正在輸入的內容不會因頁面狀態更新而清除。前後端只檢查輸入是否為可安全傳入 HTTP 標頭的單行可列印內容、合理長度與非明顯網址，不推定 Google 金鑰前綴或真實有效性；只有使用者明確按診斷頁「先測文字連線」才會向 Google 驗證，且可能使用 API 額度。已開始的 Google 請求不能撤回；結果不明時不自動重送。session cookie 為隨機秘密，資料庫只保存其雜湊；金鑰不寫入資料庫、cookie、報告或日誌。網站登入有效期 8 小時；登出會換成無權限 cookie，重新登入同一瀏覽器可取回該 session 的文件與工作。清除 cookie 或更換瀏覽器不保證取回。這是單一共用測試帳號，不是正式多使用者授權。
 
 ## 公開測試與 ASUS 部署
 
 2026-09-28 已將應用及唯一可寫的 SQLite/PDF 資料遷至 ASUS，公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；HP 舊 `orderflow.service` 已停用，原始資料及停寫備份保留。ASUS app 僅監聽 `127.0.0.1:18081`，HP Caddy 經本機 `127.0.0.1:18082` 的釘選 SSH local forward 連到 ASUS；網站入口改用應用表單登入。主機與資料驗證詳見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)；切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。
 
-截至本增量開發前，已核對的 ASUS runtime release 為 `eb2f928ce213a6b4b23dca6b04f095f5adc98bb9`。本分支的管理介面尚未部署；部署後須另記實際 runtime commit 與驗證結果。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
+2026-09-29 唯讀核對的 ASUS runtime release 為 `802486c6aec41fd20119d9ab748bfaa649a4f21e`，管理頁與診斷頁已上線。本分支的金鑰欄位修正尚待升級閘門執行；部署後須另記實際 runtime commit 與驗證結果。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 
@@ -38,6 +38,8 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 uv run --locked python -m unittest discover -s tests -v
 node tests/test_report.cjs
 node tests/test_guided_flow.cjs
+node tests/test_startup.cjs
+node tests/test_management_ui.cjs
 node --check web/app.js
 node --check web/manage.js
 ```
