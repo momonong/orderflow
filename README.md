@@ -26,7 +26,7 @@ uv run --locked python -m orderflow.app --port 8765 --data-dir .local-data --aut
 
 2026-09-28 已將應用及唯一可寫的 SQLite/PDF 資料遷至 ASUS，公開 URL 維持 `https://momonong.me/orderflow/`。HP 保留 Cloudflare Tunnel、Caddy、公開首頁及其他服務；HP 舊 `orderflow.service` 已停用，原始資料及停寫備份保留。ASUS app 僅監聽 `127.0.0.1:18081`，HP Caddy 經本機 `127.0.0.1:18082` 的釘選 SSH local forward 連到 ASUS；網站入口改用應用表單登入。主機與資料驗證詳見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)；切換及回復流程見 `selfhost-servers/docs/orderflow-session-rollout.md`。
 
-2026-09-29 唯讀核對的 ASUS runtime release 為 `802486c6aec41fd20119d9ab748bfaa649a4f21e`，管理頁與診斷頁已上線。本分支的金鑰欄位修正尚待升級閘門執行；部署後須另記實際 runtime commit 與驗證結果。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
+2026-09-29 金鑰欄位修正已部署：ASUS runtime release 為 `7d451d9ec857dbd6f8174adad30cba1d088a9110`；GitHub `main` 合併提交為 `86588dcfc644bbda636a35895e411858632727f2`，兩者程式樹相同。root gate 回報備份與資料保留通過；獨立唯讀核對的服務及公開路由結果見 [ASUS 部署紀錄](docs/asus-deployment-2026-09-28.md)。ASUS root-only 私鑰、HP 原憑證與備份均保留；遷移過程中的操作員可讀 credential 密文已於成功匯入後刪除。
 
 在公開模式下，應用使用 `--public-origin https://momonong.me`，只接受相符的 Host，寫入請求須有相符 Origin，session cookie 使用 `Secure`。匿名只可讀登入頁與靜態資源；API 資料與操作均須登入。應用不信任任意客戶端代理標頭，也不接受前端指定任意 Google URL 或模型 ID。需登入的健康檢查為 `/orderflow/api/health`；無 session 回傳 401。Caddy 已停止對 `/orderflow/` 使用 Basic Auth；應用表單登入保護 API 與資料。
 

@@ -9,3 +9,12 @@
 - 真實 LINE 內建瀏覽器選檔／複製、Google 文字與 PDF 呼叫、辨識品質與人工驗收均未驗證。ASUS 持續備份與保留政策尚未建立；一次性 HP 備份不可當作後續 ASUS 寫入備份。
 
 不要重啟 HP 舊服務或把 Caddy 指回舊資料。回復需先對帳 ASUS 新寫入，詳見 `selfhost-servers/docs/orderflow-session-rollout.md`。
+
+## 2026-09-29 金鑰欄位修正部署
+
+- GitHub [PR #5](https://github.com/momonong/orderflow/pull/5) 已合併至 `main`，merge commit `86588dcfc644bbda636a35895e411858632727f2`；ASUS 使用 PR head release `7d451d9ec857dbd6f8174adad30cba1d088a9110`，兩者 Git tree 同為 `5872427ba010b6e08dacbe0c1bc90f10f7bf1419`。管理介面本體屬於先前已合併的 PR #4，本次只修正 Google key 輸入生命週期與安全提示。
+- 操作者執行的一次性 ASUS root gate 回報：候選 tar 與腳本 SHA-256 均通過；`ASUS key-input upgrade and protected loopback health: PASS`；升級前備份為 `/var/backups/orderflow/before-key-input-fix-7d451d9ec857`；SQLite、PDF、session 保留，程序重啟後記憶體內 AI key 清除。非特權核對無法讀取 root-only 備份內容，以上資料保留結論來自 gate 回報。
+- 隨後由非特權帳號獨立核對：ASUS `/opt/orderflow/current` 指向 `releases/7d451d9ec857dbd6f8174adad30cba1d088a9110`，`orderflow.service` active/enabled、`NRestarts=0`，僅監聽 `127.0.0.1:18081`，`/var/lib/orderflow` 為 `0700 orderflow:orderflow`。HP `orderflow-asus-tunnel`、Caddy、cloudflared 均 active/enabled、`NRestarts=0`；HP 舊 `orderflow.service` inactive/disabled；轉送僅監聽 `127.0.0.1:18082`。HP live Caddyfile SHA-256 仍為 `fe0e95aa488cfb73a8d801bc332e40e866a65a32454e11f69979293a4b961be8`。
+- 公開 HTTPS 唯讀核對：`/orderflow/` 與 `/orderflow/test/` 回 200，HTML、管理與診斷 JS/CSS 的 SHA-256 均與 ASUS release 相同；匿名 `/orderflow/api/bootstrap` 和 `/orderflow/api/management/bootstrap` 回 401 `AUTH_REQUIRED`，沒有 Basic Auth challenge；首頁 `/` 回 200，`/orderflow-other/` 回 404，`/orderflow/test` 回 308 並導向 `/orderflow/test/`。
+- 本機以與 ASUS 靜態資源逐位元相同的程式碼及**合成帳號/金鑰**核對兩頁：金鑰欄位無預設 `value`、初始 `readonly`，與網站密碼欄位名稱分開；貼入網址被本地拒絕，合成金鑰可設定、清除及登出。沒有使用真實金鑰、上傳真實 PDF 或再次呼叫 Google。第三方密碼管理器可能稍後填入欄位，使用者實際 Chrome 尚待驗收；本次不能宣稱完整物流功能或人工接受。
+- ASUS 操作員私有 staging `/home/morris/orderflow-key-input-7d451d9` 與 root 私有 gate 目錄尚未清理；保留候選封存、腳本及備份供交接。ASUS 持續備份與保留政策仍未建立；這次一次性 root 備份不等於持續備份。
