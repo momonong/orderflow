@@ -402,6 +402,25 @@ class PublicAiTests(unittest.TestCase):
             self.server.keys[session_id] = (FAKE_KEY, time.monotonic() - 1)
         self.assertFalse(self.request("GET", "/orderflow/api/key", cookie=self.cookie)[1]["configured"])
 
+    def test_key_input_shape_is_local_and_does_not_disclose_value(self):
+        invalid = (None, "", "with space", "line\nbreak", "非ASCII",
+                   "https://aistudio.google.com/apikey", "www.example.com/key", "x" * 257)
+        for candidate in invalid:
+            with self.subTest(kind=type(candidate).__name__, size=len(candidate) if isinstance(candidate, str) else 0):
+                status, body, _ = self.post_json("/orderflow/api/key", {"key": candidate})
+                self.assertEqual((status, body), (400, {"error_code": "BAD_KEY"}))
+                self.assertFalse(self.request("GET", "/orderflow/api/key", cookie=self.cookie)[1]["configured"])
+
+        # No fixed Google prefix or length is assumed. Saving is local; no Google request is made.
+        opaque = "opaqueA12!"
+        with patch.object(GeminiAdapter, "check_text", side_effect=AssertionError("network check")):
+            status, body, _ = self.post_json("/orderflow/api/key", {"key": opaque})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["configured"])
+        self.assertNotIn(opaque, json.dumps(body))
+        self.assertNotIn(opaque, json.dumps(self.request("GET", "/orderflow/api/bootstrap", cookie=self.cookie)[1]))
+        self.assertNotIn(opaque, self.store.db_path.read_bytes().decode("utf-8", errors="ignore"))
+
 
 class GeminiAdapterTests(unittest.TestCase):
     def test_pdf_request_fixed_model_header_and_schema(self):

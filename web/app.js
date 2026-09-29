@@ -24,12 +24,42 @@ let uploadUnknown = false;
 let jobSubmitUnknown = false;
 let aiKeyConfigured = false;
 let keyBusy = false;
+let keyFieldUsed = false;
+let keyWorkspaceShown = false;
+
+function clearKeyInput() {
+  const field = $("ai-key");
+  field.value = "";
+  field.readOnly = true;
+  keyFieldUsed = false;
+}
+function prepareKeyInput() {
+  clearKeyInput();
+  const field = $("ai-key");
+  field.addEventListener("focus", () => {
+    if (field.readOnly) {
+      field.value = "";
+      field.readOnly = false;
+    }
+  });
+  field.addEventListener("input", () => { keyFieldUsed = true; });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && !keyFieldUsed) clearKeyInput();
+  });
+}
+function keyInputError(value) {
+  if (!value) return "請先貼上 Google AI Studio API key；不要輸入網站密碼。";
+  if (value.length > 256 || /[^\x21-\x7e]/.test(value) || value.includes("://") || /^www\./i.test(value))
+    return "這看起來不是單一 API key。請勿貼網址、空白或網站密碼；請從 AI Studio 重新複製。";
+  return null;
+}
 
 function showLogin(message = "請輸入網站登入密碼，才能查看測試資料。") {
+  keyWorkspaceShown = false;
   $("workspace").hidden = true;
   $("login-section").hidden = false;
   $("login-password").value = "";
-  $("ai-key").value = "";
+  clearKeyInput();
   $("report").value = "";
   documents = [];
   jobs = [];
@@ -438,7 +468,8 @@ async function pollJob(id) {
 }
 async function saveKey() {
   const key = $("ai-key").value;
-  if (!key) { setStatus("key-status", "請先貼上你的 AI Studio API key。", "fail"); return; }
+  const issue = keyInputError(key);
+  if (issue) { setStatus("key-status", issue, "fail"); return; }
   keyBusy = true;
   $("save-key").disabled = true;
   setStatus("key-status", "正在設定金鑰……", "working");
@@ -446,12 +477,14 @@ async function saveKey() {
     await api("key", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({key})});
     aiKeyConfigured = true;
     mark("text_check", "not_run");
-    setStatus("key-status", "金鑰已設定，15 分鐘後失效；頁面不會再顯示金鑰。", "pass");
+    setStatus("key-status", "金鑰已暫存，15 分鐘後失效；欄位不會回填。格式不代表有效，可明確按「先測文字連線」確認權限與額度。", "pass");
     setStatus("real-status", currentDocument ? "可以按下方按鈕開始真正辨識。" : "請先上傳測試 PDF。");
   } catch (error) {
-    setStatus("key-status", error.code === "KEY_CAPACITY" ? keyAdvice("KEY_CAPACITY") : "金鑰未設定。請確認格式與連線後再試。", "fail");
+    setStatus("key-status", error.code === "KEY_CAPACITY" ? keyAdvice("KEY_CAPACITY")
+      : error.code === "BAD_KEY" ? "輸入形式不符。請從 AI Studio 複製單一金鑰，勿貼網站密碼或網址。"
+      : "金鑰未設定。請確認連線後再試。", "fail");
   } finally {
-    $("ai-key").value = "";
+    clearKeyInput();
     keyBusy = false;
     $("save-key").disabled = false;
     updateRealControls();
@@ -583,6 +616,10 @@ async function loadBootstrap() {
       selectDocument(documents[0]);
       setStatus("basic-status", "已找回先前的上傳紀錄；若要測新檔案，請先按「檢查連線」。");
     }
+    if (!keyWorkspaceShown) {
+      clearKeyInput();
+      keyWorkspaceShown = true;
+    }
     $("login-section").hidden = true;
     $("workspace").hidden = false;
     $("startup-section").hidden = true;
@@ -595,7 +632,7 @@ async function loadBootstrap() {
   }
 }
 async function initialize() {
-
+  prepareKeyInput();
   $("login-form").addEventListener("submit", login);
   $("logout-button").addEventListener("click", logout);
   updateReport();
