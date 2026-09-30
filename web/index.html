@@ -59,6 +59,12 @@
             <div class="key-row"><label for="ai-key">API Key</label><input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly><button id="set-key" type="button">套用金鑰</button><button id="clear-key" class="quiet" type="button">清除金鑰</button></div>
             <p id="key-status" class="status" role="status">尚未設定。</p>
           </div></section>
+          <section class="card" aria-labelledby="local-title"><div class="card-heading"><h2 id="local-title">本機解析（不使用 AI）</h2></div><div class="card-body">
+            <p>目前僅支援有文字層的單頁科雅採購憑單，最多 8 MB。選檔與解析在此瀏覽器完成；解析時 PDF 不傳至網站主機或 Google。核對品項後按「確認並儲存記錄」，才會把 PDF 與人工確認記錄送至網站主機保存；不會送 Google。</p>
+            <label for="local-pdf">選擇採購憑單 PDF</label><input id="local-pdf" type="file" accept="application/pdf,.pdf">
+            <div class="actions"><button id="local-parse" type="button">在瀏覽器解析</button><button id="local-cancel" class="quiet" type="button" disabled>取消解析</button></div>
+            <p id="local-status" class="status" role="status">尚未選檔。</p><p id="local-hints" class="muted" hidden></p>
+          </div></section>
           <section class="card" aria-labelledby="upload-title"><div class="card-heading"><h2 id="upload-title">AI 自動分析</h2><span class="ai-badge">Gemini 3.1 Flash Lite</span></div><div class="card-body">
             <p>選擇採購單或發票 PDF。單檔上限 8 MB；上傳後仍須明確確認，才會將文件送交 Google 辨識。</p>
             <div class="upload-grid">

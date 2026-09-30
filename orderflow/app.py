@@ -42,6 +42,7 @@ KEY_TTL_SECONDS = 15 * 60
 PURPOSES = {"diagnostic", "management"}
 MAX_DRAFT_JSON_BYTES = 32 * 1024
 MAX_RECORD_JSON_BYTES = 128 * 1024
+LOCAL_PARSER_ID = "koya-purchase-v1"
 MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
 MAX_JOBS_PER_DOCUMENT = 10
@@ -181,15 +182,44 @@ class Store:
                 document_kind TEXT NOT NULL CHECK (document_kind IN ('purchase_order','invoice')),
                 PRIMARY KEY (session_id, request_key)
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS management_local_sources (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+                request_key TEXT NOT NULL, parser_id TEXT NOT NULL,
+                candidate_rows_json TEXT NOT NULL, created_ms INTEGER NOT NULL,
+                UNIQUE(session_id, request_key)
+            )""")
             db.execute("""CREATE TABLE IF NOT EXISTS management_record_sets (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                 document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
-                source_job_id TEXT NOT NULL REFERENCES jobs(id),
+                source_job_id TEXT REFERENCES jobs(id),
+                source_local_id TEXT REFERENCES management_local_sources(id),
                 kind TEXT NOT NULL CHECK (kind IN ('purchase_order','invoice')),
                 rows_json TEXT NOT NULL,
                 revision INTEGER NOT NULL CHECK (revision > 0),
-                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL
+                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+                CHECK ((source_job_id IS NOT NULL) != (source_local_id IS NOT NULL))
             )""")
+            record_columns = {row[1] for row in db.execute("PRAGMA table_info(management_record_sets)")}
+            if "source_local_id" not in record_columns:
+                # Keep all existing Gemini records and revision IDs while adding a distinct local source.
+                db.execute("""CREATE TABLE management_record_sets_new (
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+                    source_job_id TEXT REFERENCES jobs(id),
+                    source_local_id TEXT REFERENCES management_local_sources(id),
+                    kind TEXT NOT NULL CHECK (kind IN ('purchase_order','invoice')),
+                    rows_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+                    created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+                    CHECK ((source_job_id IS NOT NULL) != (source_local_id IS NOT NULL))
+                )""")
+                db.execute("""INSERT INTO management_record_sets_new
+                    (id,session_id,document_id,source_job_id,source_local_id,kind,
+                     rows_json,revision,created_ms,updated_ms)
+                    SELECT id,session_id,document_id,source_job_id,NULL,kind,
+                           rows_json,revision,created_ms,updated_ms FROM management_record_sets""")
+                db.execute("DROP TABLE management_record_sets")
+                db.execute("ALTER TABLE management_record_sets_new RENAME TO management_record_sets")
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
         self.db_path.chmod(0o600)
@@ -523,9 +553,59 @@ class Store:
     @staticmethod
     def public_record_set(row: sqlite3.Row) -> dict:
         return {"id": row["id"], "document_id": row["document_id"],
-                "source_job_id": row["source_job_id"], "kind": row["kind"],
+                "source_job_id": row["source_job_id"], "source_local_id": row["source_local_id"],
+                "kind": row["kind"],
                 "rows": json.loads(row["rows_json"]), "revision": row["revision"],
                 "created_ms": row["created_ms"], "updated_ms": row["updated_ms"]}
+
+    @staticmethod
+    def public_local_source(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "document_id": row["document_id"],
+                "parser_id": row["parser_id"],
+                "candidate_rows": json.loads(row["candidate_rows_json"]),
+                "created_ms": row["created_ms"]}
+
+    def local_sources(self, session_id: str) -> list[dict]:
+        with self.db() as db:
+            rows = db.execute("SELECT l.* FROM management_local_sources l "
+                              "JOIN documents d ON d.id=l.document_id "
+                              "WHERE l.session_id=? AND d.session_id=? "
+                              "AND d.purpose='management' AND d.document_kind='purchase_order' "
+                              "ORDER BY l.created_ms DESC", (session_id, session_id)).fetchall()
+        return [self.public_local_source(row) for row in rows]
+
+    def add_local_source(self, session_id: str, document_id: str, request_key: str,
+                         parser_id: str, candidate_rows: object) -> tuple[dict, bool]:
+        if not valid_uuid(document_id) or not valid_uuid(request_key) or parser_id != LOCAL_PARSER_ID:
+            raise ValueError("LOCAL_SOURCE_INVALID")
+        checked = validate_rows(candidate_rows, "purchase_order")
+        encoded = json.dumps(checked, ensure_ascii=False, separators=(",", ":"))
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            document = db.execute("SELECT id FROM documents WHERE id=? AND session_id=? "
+                                  "AND purpose='management' AND document_kind='purchase_order' "
+                                  "AND page_count=1", (document_id, session_id)).fetchone()
+            if not document:
+                raise LookupError("LOCAL_DOCUMENT_NOT_FOUND")
+            saved = db.execute("SELECT source_job_id FROM management_record_sets "
+                               "WHERE document_id=? AND session_id=?", (document_id, session_id)).fetchone()
+            if saved and saved["source_job_id"] is not None:
+                raise ValueError("LOCAL_SOURCE_CONFLICT")
+            existing = db.execute("SELECT * FROM management_local_sources "
+                                  "WHERE (session_id=? AND request_key=?) OR document_id=?",
+                                  (session_id, request_key, document_id)).fetchone()
+            if existing:
+                if existing["session_id"] != session_id or existing["document_id"] != document_id or \
+                   existing["parser_id"] != parser_id or existing["candidate_rows_json"] != encoded:
+                    raise ValueError("LOCAL_SOURCE_CONFLICT")
+                return self.public_local_source(existing), False
+            source_id = str(uuid.uuid4())
+            db.execute("INSERT INTO management_local_sources "
+                       "(id,session_id,document_id,request_key,parser_id,candidate_rows_json,created_ms) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (source_id, session_id, document_id, request_key, parser_id, encoded, now_ms()))
+            row = db.execute("SELECT * FROM management_local_sources WHERE id=?", (source_id,)).fetchone()
+        return self.public_local_source(row), True
 
     def record_sets(self, session_id: str) -> list[dict]:
         with self.db() as db:
@@ -551,21 +631,30 @@ class Store:
             if invoice[field] is not None and order[field] is not None and invoice[field] != order[field]:
                 raise ValueError("RECORD_LINK_CONFLICT")
 
-    def save_record_set(self, session_id: str, document_id: str, source_job_id: str,
-                        expected_revision: int, rows: object) -> tuple[dict, bool]:
+    def save_record_set(self, session_id: str, document_id: str, source_job_id: str | None,
+                        expected_revision: int, rows: object, *,
+                        source_local_id: str | None = None) -> tuple[dict, bool]:
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("RECORD_VERSION_INVALID")
-        if not valid_uuid(document_id) or not valid_uuid(source_job_id):
+        if not valid_uuid(document_id) or valid_uuid(source_job_id) == valid_uuid(source_local_id):
             raise LookupError("RECORD_SOURCE_NOT_FOUND")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            source = db.execute("SELECT d.document_kind FROM documents d "
-                                "JOIN jobs j ON j.document_id=d.id "
-                                "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
-                                "AND d.document_kind IN ('purchase_order','invoice') "
-                                "AND j.id=? AND j.session_id=? AND j.scenario='real' "
-                                "AND j.state='done'",
-                                (document_id, session_id, source_job_id, session_id)).fetchone()
+            if source_local_id:
+                source = db.execute("SELECT d.document_kind FROM documents d "
+                                    "JOIN management_local_sources l ON l.document_id=d.id "
+                                    "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
+                                    "AND d.document_kind='purchase_order' AND l.id=? "
+                                    "AND l.session_id=?",
+                                    (document_id, session_id, source_local_id, session_id)).fetchone()
+            else:
+                source = db.execute("SELECT d.document_kind FROM documents d "
+                                    "JOIN jobs j ON j.document_id=d.id "
+                                    "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
+                                    "AND d.document_kind IN ('purchase_order','invoice') "
+                                    "AND j.id=? AND j.session_id=? AND j.scenario='real' "
+                                    "AND j.state='done'",
+                                    (document_id, session_id, source_job_id, session_id)).fetchone()
             if not source:
                 raise LookupError("RECORD_SOURCE_NOT_FOUND")
             kind = source["document_kind"]
@@ -574,7 +663,8 @@ class Store:
             existing = db.execute("SELECT * FROM management_record_sets "
                                   "WHERE document_id=? AND session_id=?", (document_id, session_id)).fetchone()
             if existing:
-                if existing["source_job_id"] != source_job_id or existing["kind"] != kind:
+                if (existing["source_job_id"] != source_job_id or
+                    existing["source_local_id"] != source_local_id or existing["kind"] != kind):
                     raise ValueError("RECORD_SOURCE_CONFLICT")
                 old_rows = json.loads(existing["rows_json"])
                 new_by_id = {row["id"]: row for row in checked}
@@ -646,10 +736,10 @@ class Store:
             else:
                 record_id = str(uuid.uuid4())
                 db.execute("INSERT INTO management_record_sets "
-                           "(id,session_id,document_id,source_job_id,kind,rows_json,revision,created_ms,updated_ms) "
-                           "VALUES (?,?,?,?,?,?,?,?,?)",
-                           (record_id, session_id, document_id, source_job_id, kind, rows_json, 1,
-                            timestamp, timestamp))
+                           "(id,session_id,document_id,source_job_id,source_local_id,kind,rows_json,revision,created_ms,updated_ms) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (record_id, session_id, document_id, source_job_id, source_local_id,
+                            kind, rows_json, 1, timestamp, timestamp))
                 created = True
             saved = db.execute("SELECT * FROM management_record_sets WHERE id=?", (record_id,)).fetchone()
         return self.public_record_set(saved), created
@@ -980,6 +1070,10 @@ class Handler(BaseHTTPRequestHandler):
             PREFIX: ("index.html", "text/html"),
             PREFIX + "manage.js": ("manage.js", "text/javascript"),
             PREFIX + "manage.css": ("manage.css", "text/css"),
+            PREFIX + "local-pdf-core.mjs": ("local-pdf-core.mjs", "text/javascript"),
+            PREFIX + "local-pdf-worker.mjs": ("local-pdf-worker.mjs", "text/javascript"),
+            PREFIX + "vendor/pdfjs/pdf.min.mjs": ("vendor/pdfjs/pdf.min.mjs", "text/javascript"),
+            PREFIX + "vendor/pdfjs/pdf.worker.min.mjs": ("vendor/pdfjs/pdf.worker.min.mjs", "text/javascript"),
             PREFIX + "test/": ("test.html", "text/html"),
             PREFIX + "app.js": ("app.js", "text/javascript"),
             PREFIX + "style.css": ("style.css", "text/css"),
@@ -998,7 +1092,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(data)
             return
@@ -1027,6 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "jobs": self.server.store.jobs(session_id, "management"),
                                      "drafts": self.server.store.management_drafts(session_id),
                                      "record_sets": self.server.store.record_sets(session_id),
+                                     "local_sources": self.server.store.local_sources(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
                                      "ai_model": GEMINI_MODEL,
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
@@ -1179,6 +1274,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.json_response(200, {"nonce": nonce})
             return
+        if path == PREFIX + "api/management/local-sources":
+            value = self.get_json(MAX_RECORD_JSON_BYTES)
+            if value is None:
+                return
+            if set(value) != {"document_id", "request_key", "parser_id", "candidate_rows"}:
+                self.error(400, "LOCAL_SOURCE_INVALID")
+                return
+            try:
+                source, created = self.server.store.add_local_source(
+                    session_id, value["document_id"], value["request_key"],
+                    value["parser_id"], value["candidate_rows"])
+            except LookupError:
+                self.error(404, "LOCAL_DOCUMENT_NOT_FOUND")
+                return
+            except RecordRowsError as exc:
+                self.json_response(400, {"error_code": "RECORD_ROWS_INVALID", "errors": exc.errors})
+                return
+            except ValueError as exc:
+                code = str(exc)
+                self.error(409 if code == "LOCAL_SOURCE_CONFLICT" else 400, code)
+                return
+            self.json_response(201 if created else 200, source)
+            return
         if path in {PREFIX + "api/documents", PREFIX + "api/management/documents"}:
             purpose = "management" if path == PREFIX + "api/management/documents" else "diagnostic"
             self.upload(session_id, purpose)
@@ -1263,13 +1381,15 @@ class Handler(BaseHTTPRequestHandler):
             value = self.get_json(MAX_RECORD_JSON_BYTES)
             if value is None:
                 return
-            if set(value) != {"source_job_id", "revision", "rows"}:
+            if set(value) not in ({"source_job_id", "revision", "rows"},
+                                  {"source_local_id", "revision", "rows"}):
                 self.error(400, "RECORD_ROWS_INVALID")
                 return
             try:
                 record, created = self.server.store.save_record_set(
-                    session_id, document_id, value["source_job_id"],
-                    value["revision"], value["rows"])
+                    session_id, document_id, value.get("source_job_id"),
+                    value["revision"], value["rows"],
+                    source_local_id=value.get("source_local_id"))
             except LookupError:
                 self.error(404, "RECORD_SOURCE_NOT_FOUND")
                 return
