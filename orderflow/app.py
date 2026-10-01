@@ -26,7 +26,7 @@ from pypdf import PdfReader
 
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
-from .diagnostics import audit_event, client_report
+from .diagnostics import BUILD_ID, audit_event, client_report
 from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
 
@@ -900,18 +900,20 @@ def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
             audit_event("real_job", job_id, "done", trace)
     except AIUnknown as exc:
         metadata = safe_ai_metadata(exc)
-        store.set_job(job_id, state="unknown", error_code=safe_ai_code(exc.code, "AI_RESULT_UNKNOWN"),
+        code = safe_ai_code(exc.code, "AI_RESULT_UNKNOWN")
+        store.set_job(job_id, state="unknown", error_code=code,
                       steps={"ai": "unknown", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
             audit_event("real_job", job_id, "db_committed", trace)
-            audit_event("real_job", job_id, "unknown", {**trace, **metadata})
+            audit_event("real_job", job_id, "unknown", {**trace, "code": code, **metadata})
     except AIError as exc:
         metadata = safe_ai_metadata(exc)
-        store.set_job(job_id, state="failed", error_code=safe_ai_code(exc.code, "AI_FAILURE"),
+        code = safe_ai_code(exc.code, "AI_FAILURE")
+        store.set_job(job_id, state="failed", error_code=code,
                       steps={"ai": "fail", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
             audit_event("real_job", job_id, "db_committed", trace)
-            audit_event("real_job", job_id, "failed", {**trace, **metadata})
+            audit_event("real_job", job_id, "failed", {**trace, "code": code, **metadata})
     except ResultFormatError as exc:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
                       steps={"ai": "pass", "format": "fail"}, finished_ms=now_ms())
@@ -924,7 +926,8 @@ def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
         if real:
             audit_event("real_job", job_id, "db_committed", trace)
-            audit_event("real_job", job_id, "internal_unknown", trace)
+            audit_event("real_job", job_id, "internal_unknown",
+                        {**trace, "code": "INTERNAL_UNKNOWN"})
 
 
 class AppServer(ThreadingHTTPServer):
@@ -1241,7 +1244,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == PREFIX + "api/health":
             if not self.get_session():
                 return
-            self.json_response(200, {"status": "ok", "version": VERSION, "mode": "mock-and-real"})
+            self.json_response(200, {"status": "ok", "version": VERSION,
+                                     "build_id": BUILD_ID, "mode": "mock-and-real"})
             return
         if path == PREFIX + "api/bootstrap":
             session_id = self.get_session()

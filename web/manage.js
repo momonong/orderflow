@@ -278,7 +278,8 @@ function jobErrorSummary(job) {
   const id = typeof job.id === "string" && validUuid.test(job.id) ? job.id : "unknown";
   const safeCodes = new Set(["AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED",
     "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED",
-    "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN",
+    "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "AI_RESULT_UNKNOWN",
+    "AI_FAILURE",
     "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN"]);
   const code = safeCodes.has(job.error_code) ? job.error_code : "UNKNOWN";
   const created = utcTime(job.created_ms);

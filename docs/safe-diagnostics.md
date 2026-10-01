@@ -13,7 +13,7 @@
 ## 限制與保護
 
 - 只向 systemd journal 輸出固定欄位：版本、UTC 毫秒時間、事件、階段、固定路由、狀態、耗時、UUID、固定錯誤或上游分類。格式驗證失敗另可記固定原因、從 0 起算的品項索引、白名單欄位、固定型態及超長文字的區間（201–500、501–1000、超過 1000 字），不記原始值。沒有 PDF 內容、品項、檔名、key、Cookie、IP、User-Agent、header、query、HTTP body、Google 回應正文或原始例外文字。
-- POST /orderflow/api/diagnostics 必須登入、同源 Origin、既有自訂 header；每筆只接受固定欄位與列舉、最多 12 個事件和 4096 bytes。每登入會話最多每分鐘 12 次，伺服器整體最多每分鐘 600 個 audit 事件；超過上限不影響業務請求。瀏覽器只在已看到應用程式標記時嘗試自動送出最少事件，5 秒節流，失敗後停止自動送出，且不重試業務操作。複製資訊仍可手動使用。
+- POST /orderflow/api/diagnostics 必須登入、同源 Origin、既有自訂 header；每筆只接受固定欄位與列舉、最多 12 個事件和 4096 bytes。每登入會話最多每分鐘 12 次。伺服器每分鐘 600 筆 audit 額度分成工作終態 200、工作進度及建立工作等關鍵事件 120、瀏覽器觀察 60、一般請求 220；某類滿額時不佔用其他類的額度，並以 1、2、4…1024 筆的固定丟失摘要提示。任何一類持續超量仍可能失去個別事件；摘要不含識別碼或內容。超過上限不影響業務請求。瀏覽器只在已看到應用程式標記時嘗試自動送出最少事件，5 秒節流，失敗後停止自動送出，且不重試業務操作。複製資訊仍可手動使用。
 - 不新增監控服務、持久化診斷資料表、全域 journald／Caddy／Cloudflare 設定。journal 的實際保存期限取決於主機現有設定；本候選未改它。容量滿或紀錄寫入失敗時，不能把缺少事件解讀為請求未發生。
 - 操作者依使用者複製的 trace_id 查詢：journalctl -u orderflow --since 'YYYY-MM-DD HH:MM:SS' --grep 'TRACE_UUID' --no-pager。依 request_id 或 job_id 再查同次請求與背景工作。搜尋輸出仍須在授權的本機終端處理，不貼出整段 journal。
 
@@ -52,8 +52,14 @@ sudo journalctl -u orderflow.service --since 'YYYY-MM-DD HH:MM:SS' --until 'YYYY
 
 合成測試驗證的事件順序範例（識別字省略，非公司端實際日誌）：`http.received → http.db_committed(job_id) → http.response_written(202)`，同一 job 為 `real_job.start → ai_start → ai_response → db_committed → result_format_invalid(code=RESULT_FORMAT_INVALID, format_reason=FIELD_TYPE, item_index=0, field=qty, actual_type=number)`。這能證明應用程式收到並保存了失敗工作，且驗證器拒絕第 1 筆 `qty` 的型態；不揭露該值、PDF 內容，也不代表上游無計費。另一個合成測試讓 adapter 拋出非格式 `ValueError`，記為 `internal_unknown`，不誤記 `result_format_invalid`。
 
-查無事件時，先核對 journal 權限、時間窗、保留期限、該次服務程序是否曾重啟及每分鐘 600 筆的 audit 限流；瀏覽器上傳診斷本身也可能被入口攔截、登入失效、5 秒節流或每會話每分鐘 12 次限制。缺席不能證明請求未到主機。此候選的詳細格式原因尚未部署，ASUS 現行版只能依既有事件與工作狀態判讀；上線需另行批准與驗證，不應把本機合成測試當成表姐的公司端驗收。
+查無事件時，先核對 journal 權限、時間窗、保留期限、該次服務程序是否曾重啟及分類 audit 額度／丟失摘要；瀏覽器上傳診斷本身也可能被入口攔截、登入失效、5 秒節流或每會話每分鐘 12 次限制。缺席不能證明請求未到主機。此候選的詳細格式原因尚未部署，ASUS 現行版只能依既有事件與工作狀態判讀；不應把本機合成測試當成表姐的公司端驗收。
 
 格式原因修正提交 `db1264a` 與一鍵複製補強 `c6a5995` 已通過本機 Python 67 項、JavaScript 10 個測試入口。新後端只在測試程序中執行；上節的 18770 預覽是在此修正前啟動的 Python 程序，尚未載入新後端程式，不可用它驗收 `format_reason`。原有 8765 預覽及 ASUS 正式服務也未因本次提交而重啟或切換。
 
 唯讀 journal 鏈路另用 18770 隔離 user unit 驗證：帶合成 trace/request UUID 的匿名 `GET /orderflow/api/bootstrap` 回 401，`journalctl --user -u orderflow-safe-diagnostics-preview-7116c3e.service --grep <trace UUID>` 查到同一 request 的 `http.received → http.response_written(401)`。這只證明本機 user unit 的日誌可按識別搜尋；正式 ASUS system unit 的 journal 權限、保留與上線後新格式原因，仍須由有權限者另行核對。
+
+## 待交付的版本識別與升級閘門
+
+- 診斷腳本及後端健康檢查使用固定非秘密 build ID `diag-20261002-01`；複製摘要還有瀏覽器操作開始及複製時的 UTC 時間。它們用來區分本機候選與正式靜態資源，不能取代 Git commit 或證明兩端都已收到某次請求。
+- 成功的背景工作 GET 輪詢不逐筆塞入 24 筆瀏覽器最近事件；建立工作、失敗、回應缺應用標記及工作顯示結果另在最多 16 筆重要事件中保留。合成 80 次輪詢加 40 次其他事件的測試核對了失敗線索仍可複製。操作時間太長、重要事件超過 16 筆或整頁無法載入時，仍可能有證據缺口。
+- `deploy/upgrade-asus-diagnostics.py` 是從正式 `fbd9087` 到指定新 Git commit 的一次性 ASUS 應用閘門：封存 SHA 核對、release 測試、停寫後全狀態備份、SQLite 完整性／外鍵與所有既有表逐列及 schema 一致性、靜態檔與匿名 API/health 檢查；不改 HP、Caddy、Cloudflare 或 journald 設定。它只接受已合併版本的封存與 commit，執行前還需審核確切 SHA 與現場狀態。服務重啟會清除程序記憶體內的 AI key，操作者須預期重新輸入。

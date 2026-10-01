@@ -11,6 +11,7 @@ import uuid
 
 EVENTS = {"http", "real_job", "key_check", "client_observation"}
 APP_VERSION = "0.3.0"
+BUILD_ID = "diag-20261002-01"
 PHASES = {
     "received", "response_written", "response_write_unknown", "created",
     "start", "ai_start", "ai_response", "format_pass", "done", "failed",
@@ -31,8 +32,8 @@ CLIENT_CODES = {
     "JOB_SUBMIT_FAILED", "QUERY_FAILED", "POLL_DEADLINE", "RENDER_FAILED",
     "AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED",
     "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE",
-    "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "KEY_REQUIRED", "JOB_LIMIT",
-    "RESULT_FORMAT_INVALID",
+    "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "AI_RESULT_UNKNOWN", "AI_FAILURE",
+    "KEY_REQUIRED", "JOB_LIMIT", "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN",
 }
 SAFE_FIELDS = {
     "route", "trace_id", "request_id", "job_id", "http_status",
@@ -56,7 +57,10 @@ TRANSPORT_CLASSES = {"DNS", "TLS", "CONNECT_REFUSED", "TIMEOUT_UNKNOWN",
                      "IO_UNKNOWN", "HTTP_TRUNCATED", "HTTP_MALFORMED"}
 _WINDOW = 60.0
 _MAX_EVENTS = 600
-_times: deque[float] = deque()
+_times: dict[str, deque[float]] = {name: deque() for name in
+                                 ("routine", "client", "critical", "terminal")}
+_drop_counts = {name: 0 for name in _times}
+_drop_started = 0.0
 _lock = threading.Lock()
 
 
@@ -110,18 +114,59 @@ def audit_event(event: str, reference: str, phase: str,
     """Drop unreviewed labels or fields before they can reach the journal."""
     if event not in EVENTS or phase not in PHASES:
         return
+    if event == "client_observation":
+        category = "client"
+    elif event == "real_job" and phase in {"db_committed", "done", "failed", "unknown",
+                                           "result_format_invalid", "internal_unknown"}:
+        category = "terminal"
+    elif (event == "http" and phase == "response_write_unknown"
+          or event == "key_check" and phase in {"failed", "internal_unknown"}):
+        category = "terminal"
+    elif (event in {"real_job", "key_check"} or event == "http" and
+          (phase == "db_committed" or (metadata or {}).get("route") in {"jobs", "management_jobs"})):
+        category = "critical"
+    else:
+        category = "routine"
+    limits = {"terminal": max(1, _MAX_EVENTS // 3),
+              "critical": max(1, _MAX_EVENTS // 5), "client": max(1, _MAX_EVENTS // 10)}
+    limits["routine"] = max(1, _MAX_EVENTS - sum(limits.values()))
     now = time.monotonic()
+    drop_record = None
+    dropped = False
     with _lock:
-        while _times and _times[0] <= now - _WINDOW:
-            _times.popleft()
-        if len(_times) >= _MAX_EVENTS:
-            return
-        _times.append(now)
+        global _drop_started
+        if now - _drop_started >= _WINDOW:
+            for name in _drop_counts:
+                _drop_counts[name] = 0
+            _drop_started = now
+        times = _times[category]
+        while times and times[0] <= now - _WINDOW:
+            times.popleft()
+        if len(times) >= limits[category]:
+            dropped = True
+            _drop_counts[category] += 1
+            count = _drop_counts[category]
+            if count <= 1024 and count & (count - 1) == 0:
+                drop_record = {"event": "audit_limit", "phase": "dropped",
+                               "category": category, "dropped_count": count,
+                               "version": APP_VERSION, "build_id": BUILD_ID,
+                               "at_ms": int(time.time() * 1000)}
+        else:
+            times.append(now)
+    if drop_record:
+        _emit(drop_record)
+    if dropped:
+        return
     fields = {key: value for key, value in (metadata or {}).items()
               if key in SAFE_FIELDS and _safe_field(key, value)}
     record = {"event": event, "id": reference if valid_uuid(reference) else "invalid",
-              "phase": phase, "version": APP_VERSION, "at_ms": int(time.time() * 1000),
+              "phase": phase, "version": APP_VERSION, "build_id": BUILD_ID,
+              "at_ms": int(time.time() * 1000),
               **fields}
+    _emit(record)
+
+
+def _emit(record: dict[str, object]) -> None:
     try:
         print("orderflow_audit " + json.dumps(record, separators=(",", ":")),
               file=sys.stderr, flush=True)
