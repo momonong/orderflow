@@ -110,7 +110,9 @@ async function api(path, options = {}, timeoutMs = 10000) {
 }
 async function copyDiagnosticReport() {
   const field = el("diagnostic-report");
-  field.value = diagnostics.summary();
+  const failedJob = state.job?.state === "failed" || state.job?.state === "unknown"
+    ? `\n\n${jobErrorSummary(state.job)}` : "";
+  field.value = diagnostics.summary() + failedJob;
   try {
     if (!navigator.clipboard?.writeText) throw Error("unavailable");
     await navigator.clipboard.writeText(field.value);

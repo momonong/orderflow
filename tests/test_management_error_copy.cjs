@@ -57,6 +57,11 @@ assert.match(summary, /transport_class: TLS/);
 assert.doesNotMatch(summary, /PRIVATE_|PDF|cookie|raw_response|result/);
 
 (async () => {
+  await vm.runInContext('copyDiagnosticReport()', context);
+  assert.match(copied, new RegExp(firstId), 'one diagnostic copy includes the selected failed job ID');
+  assert.match(copied, /error_code: AI_TIMEOUT_UNKNOWN/);
+  assert.doesNotMatch(copied, /PRIVATE_/);
+
   await vm.runInContext('copyJobError()', context);
   assert.equal(copied, summary);
   assert.match(el('job-error-copy-status').textContent, /已複製/);
@@ -86,6 +91,10 @@ assert.doesNotMatch(summary, /PRIVATE_|PDF|cookie|raw_response|result/);
   copied = null;
   await vm.runInContext('copyJobError()', context);
   assert.equal(copied, null);
+
+  context.navigator.clipboard.writeText = async text => {copied = text;};
+  await vm.runInContext('copyDiagnosticReport()', context);
+  assert.doesNotMatch(copied, new RegExp(firstId), 'a completed job omits stale failure details');
 
   vm.runInContext('selectJob(jobs[0].id); showLogin()', context);
   assert.equal(el('job-error-tools').hidden, true);
