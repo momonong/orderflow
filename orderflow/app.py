@@ -26,6 +26,7 @@ from pypdf import PdfReader
 
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
+from .diagnostics import audit_event, client_report
 from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
 
@@ -51,6 +52,8 @@ SESSION_TTL_MS = 8 * 60 * 60 * 1000
 LOGIN_ATTEMPTS_PER_MINUTE = 5
 SAFE_AI_CODES = {"AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN"}
 SAFE_UPSTREAM_REASONS = {"INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"}
+SAFE_TRANSPORT_CLASSES = {"DNS", "TLS", "CONNECT_REFUSED", "TIMEOUT_UNKNOWN",
+                          "IO_UNKNOWN", "HTTP_TRUNCATED", "HTTP_MALFORMED"}
 
 
 def safe_ai_code(code: str, fallback: str) -> str:
@@ -64,17 +67,9 @@ def safe_ai_metadata(error: AIError) -> dict[str, int | str]:
         metadata["upstream_http_status"] = status
     if error.upstream_reason in SAFE_UPSTREAM_REASONS:
         metadata["upstream_reason"] = error.upstream_reason
+    if error.transport_class in SAFE_TRANSPORT_CLASSES:
+        metadata["transport_class"] = error.transport_class
     return metadata
-
-
-def audit_event(event: str, reference: str, phase: str,
-                metadata: dict[str, int | str] | None = None) -> None:
-    # Only fixed event/phase labels, canonical UUIDs, and whitelisted metadata.
-    record = {"event": event, "id": reference if valid_uuid(reference) else "invalid",
-              "phase": phase}
-    record.update(metadata or {})
-    print("orderflow_audit " + json.dumps(record, separators=(",", ":")),
-          file=sys.stderr, flush=True)
 
 
 def plausible_key_input(value: object) -> bool:
@@ -755,13 +750,17 @@ class Store:
 
 
 def run_real_job(store: Store, job_id: str, document_id: str, adapter: GeminiAdapter,
-                 slot: threading.BoundedSemaphore, document_kind: str | None = None) -> None:
+                 slot: threading.BoundedSemaphore, document_kind: str | None = None,
+                 trace_id: str | None = None) -> None:
     if not slot.acquire(blocking=False):
         store.set_job(job_id, state="failed", error_code="AI_RATE_LIMITED",
                       steps={"ai": "fail", "format": "not_run"}, finished_ms=now_ms())
+        audit_event("real_job", job_id, "db_committed", {"trace_id": trace_id})
+        audit_event("real_job", job_id, "failed",
+                    {"trace_id": trace_id, "code": "AI_RATE_LIMITED"})
         return
     try:
-        run_job(store, job_id, document_id, adapter, document_kind)
+        run_job(store, job_id, document_id, adapter, document_kind, trace_id)
     finally:
         slot.release()
 
@@ -823,40 +822,52 @@ def validate_draft_rows(value: object) -> list[dict]:
 
 
 def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
-            document_kind: str | None = None) -> None:
+            document_kind: str | None = None, trace_id: str | None = None) -> None:
     real = isinstance(adapter, GeminiAdapter)
+    trace = {"trace_id": trace_id} if trace_id else {}
     if real:
-        audit_event("real_job", job_id, "start")
+        audit_event("real_job", job_id, "start", trace)
     store.set_job(job_id, state="running", started_ms=now_ms())
     try:
+        if real:
+            audit_event("real_job", job_id, "ai_start", trace)
         raw = adapter.recognize(str(store.files / f"{document_id}.pdf"), deadline_seconds=25 if real else 5)
+        if real:
+            audit_event("real_job", job_id, "ai_response", trace)
         rows = validate_management_result(raw) if document_kind in KINDS else validate_result(raw)
+        if real:
+            audit_event("real_job", job_id, "format_pass", trace)
         store.set_job(job_id, state="done", result=rows, steps={"ai": "pass", "format": "pass"},
                       finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "done")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "done", trace)
     except AIUnknown as exc:
         metadata = safe_ai_metadata(exc)
         store.set_job(job_id, state="unknown", error_code=safe_ai_code(exc.code, "AI_RESULT_UNKNOWN"),
                       steps={"ai": "unknown", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "unknown", metadata)
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "unknown", {**trace, **metadata})
     except AIError as exc:
         metadata = safe_ai_metadata(exc)
         store.set_job(job_id, state="failed", error_code=safe_ai_code(exc.code, "AI_FAILURE"),
                       steps={"ai": "fail", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "failed", metadata)
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "failed", {**trace, **metadata})
     except ValueError:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
                       steps={"ai": "pass", "format": "fail"}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "result_format_invalid")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "result_format_invalid", trace)
     except Exception:
         store.set_job(job_id, state="unknown", error_code="INTERNAL_UNKNOWN",
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "internal_unknown")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "internal_unknown", trace)
 
 
 class AppServer(ThreadingHTTPServer):
@@ -877,6 +888,8 @@ class AppServer(ThreadingHTTPServer):
         self.auth_hash = auth_hash
         self.login_times: deque[float] = deque()
         self.login_lock = threading.Lock()
+        self.report_times: dict[str, deque[float]] = {}
+        self.report_lock = threading.Lock()
         self.store = store
         self.store.public_limits = bool(public_origin)
         self.upload_slots = threading.BoundedSemaphore(2)
@@ -899,6 +912,22 @@ class AppServer(ThreadingHTTPServer):
             if len(self.login_times) >= LOGIN_ATTEMPTS_PER_MINUTE:
                 return False
             self.login_times.append(now)
+            return True
+
+    def allow_diagnostic_report(self, session_id: str) -> bool:
+        now = time.monotonic()
+        with self.report_lock:
+            for key, times in list(self.report_times.items()):
+                while times and times[0] <= now - 60:
+                    times.popleft()
+                if not times:
+                    del self.report_times[key]
+            if len(self.report_times) >= 64 and session_id not in self.report_times:
+                return False
+            times = self.report_times.setdefault(session_id, deque())
+            if len(times) >= 12:
+                return False
+            times.append(now)
             return True
 
     def _prune_keys(self, now: float) -> None:
@@ -959,9 +988,62 @@ class Handler(BaseHTTPRequestHandler):
             self._request_id = supplied if valid_uuid(supplied) else str(uuid.uuid4())
         return self._request_id
 
+    def trace_id(self) -> str:
+        if not hasattr(self, "_trace_id"):
+            supplied = self.headers.get("X-Orderflow-Trace-Id")
+            self._trace_id = supplied if valid_uuid(supplied) else str(uuid.uuid4())
+        return self._trace_id
+
+    def route_label(self) -> str | None:
+        path = urlsplit(self.path).path
+        if not path.startswith(PREFIX + "api/"):
+            return None
+        tail = path[len(PREFIX + "api/"):]
+        exact = {
+            "bootstrap": "bootstrap", "management/bootstrap": "management_bootstrap",
+            "documents": "documents", "management/documents": "management_documents",
+            "jobs": "jobs", "management/jobs": "management_jobs",
+            "management/local-sources": "local_sources", "key/check": "key_check",
+            "echo": "echo", "sample": "sample", "diagnostics": "diagnostics",
+        }
+        if tail in exact:
+            return exact[tail]
+        for prefix, label in (("jobs/", "job_get"),
+                              ("management/jobs/", "management_job_get"),
+                              ("management/record-sets/", "record_sets"),
+                              ("management/drafts/", "drafts")):
+            if tail.startswith(prefix):
+                return label
+        return "other_api"
+
+    def audit_http(self, phase: str, status: int | None = None) -> None:
+        route = self.route_label()
+        if route is None:
+            return
+        if phase == "received":
+            self._audit_started = time.monotonic()
+        metadata: dict[str, object] = {
+            "route": route, "trace_id": self.trace_id(), "source": "server",
+        }
+        if status is not None:
+            metadata["http_status"] = int(status)
+        if hasattr(self, "_audit_started"):
+            metadata["duration_ms"] = min(120_000, max(0, int(
+                (time.monotonic() - self._audit_started) * 1000)))
+        audit_event("http", self.request_id(), phase, metadata)
+
+    def audit_commit(self, created: bool | None = None, job_id: str | None = None) -> None:
+        route = self.route_label()
+        if route is None:
+            return
+        audit_event("http", self.request_id(), "db_committed",
+                    {"route": route, "trace_id": self.trace_id(), "created": created,
+                     "job_id": job_id, "source": "server"})
+
     def end_headers(self) -> None:
         self.send_header("X-Orderflow-Origin", "app")
         self.send_header("X-Orderflow-Request-Id", self.request_id())
+        self.send_header("X-Orderflow-Trace-Id", self.trace_id())
         super().end_headers()
 
     def json_response(self, status: int, value: object, cookie: str | None = None,
@@ -982,9 +1064,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.audit_http("response_written", status)
+        except OSError:
             # The request may already be committed; the client can query or replay its key.
-            pass
+            self.audit_http("response_write_unknown", status)
 
     def error(self, status: int, code: str) -> None:
         self.json_response(status, {"error_code": code})
@@ -1059,6 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self.valid_host():
             return
+        self.audit_http("received")
         path = urlsplit(self.path).path
         if path == "/orderflow":
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)
@@ -1069,6 +1153,7 @@ class Handler(BaseHTTPRequestHandler):
         static_routes = {
             PREFIX: ("index.html", "text/html"),
             PREFIX + "manage.js": ("manage.js", "text/javascript"),
+            PREFIX + "diagnostics.js": ("diagnostics.js", "text/javascript"),
             PREFIX + "manage.css": ("manage.css", "text/css"),
             PREFIX + "local-pdf-core.mjs": ("local-pdf-core.mjs", "text/javascript"),
             PREFIX + "local-pdf-worker.mjs": ("local-pdf-worker.mjs", "text/javascript"),
@@ -1147,6 +1232,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(404, "JOB_NOT_FOUND")
                 return
             job = self.server.store.job(session_id, job_id)
+            if job:
+                audit_event("http", self.request_id(), "job_fetched",
+                            {"route": "job_get", "job_id": job_id,
+                             "trace_id": self.trace_id(), "source": "server"})
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/management/jobs/"):
@@ -1158,6 +1247,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(404, "JOB_NOT_FOUND")
                 return
             job = self.server.store.job(session_id, job_id, "management")
+            if job:
+                audit_event("http", self.request_id(), "job_fetched",
+                            {"route": "management_job_get", "job_id": job_id,
+                             "trace_id": self.trace_id(), "source": "server"})
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/management/record-sets/"):
@@ -1214,6 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self.valid_host() or not self.valid_origin():
             return
+        self.audit_http("received")
         path = urlsplit(self.path).path
         # A custom header blocks ordinary cross-site forms; no CORS headers are served.
         if self.headers.get("X-Orderflow-Request") != "1":
@@ -1227,6 +1321,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         session_id = self.get_session()
         if not session_id:
+            return
+        if path == PREFIX + "api/diagnostics":
+            value = self.get_json(4096)
+            if value is None:
+                return
+            events = client_report(value)
+            if events is None:
+                self.error(400, "DIAGNOSTIC_INVALID")
+                return
+            if not self.server.allow_diagnostic_report(session_id):
+                self.error(429, "DIAGNOSTIC_RATE_LIMITED")
+                return
+            for item in events:
+                audit_event("client_observation", self.request_id(),
+                            item["phase"], {**item, "source": "client"})
+            self.json_response(200, {"status": "recorded"})
             return
         if path == PREFIX + "api/key":
             value = self.get_json()
@@ -1248,20 +1358,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(409, "KEY_REQUIRED")
                 return
             request_id = self.request_id()
-            audit_event("key_check", request_id, "start")
+            audit_event("key_check", request_id, "start", {"trace_id": self.trace_id()})
             try:
                 GeminiAdapter(key).check_text()
             except (AIError, AIUnknown) as exc:
                 metadata = safe_ai_metadata(exc)
-                audit_event("key_check", request_id, "failed", {"app_http_status": 502, **metadata})
+                audit_event("key_check", request_id, "failed",
+                            {"trace_id": self.trace_id(), "app_http_status": 502, **metadata})
                 self.json_response(502, {"error_code": safe_ai_code(exc.code, "AI_HTTP_UNKNOWN"),
                                          **metadata})
                 return
             except Exception:
-                audit_event("key_check", request_id, "internal_unknown", {"app_http_status": 502})
+                audit_event("key_check", request_id, "internal_unknown",
+                            {"trace_id": self.trace_id(), "app_http_status": 502})
                 self.error(502, "AI_HTTP_UNKNOWN")
                 return
-            audit_event("key_check", request_id, "done", {"app_http_status": 200})
+            audit_event("key_check", request_id, "done",
+                        {"trace_id": self.trace_id(), "app_http_status": 200})
             self.json_response(200, {"status": "ok", "model": GEMINI_MODEL})
             return
         if path == PREFIX + "api/echo":
@@ -1295,6 +1408,7 @@ class Handler(BaseHTTPRequestHandler):
                 code = str(exc)
                 self.error(409 if code == "LOCAL_SOURCE_CONFLICT" else 400, code)
                 return
+            self.audit_commit(created)
             self.json_response(201 if created else 200, source)
             return
         if path in {PREFIX + "api/documents", PREFIX + "api/management/documents"}:
@@ -1325,6 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(429 if code == "JOB_LIMIT" else 409,
                            "JOB_LIMIT" if code == "JOB_LIMIT" else "IDEMPOTENCY_CONFLICT")
                 return
+            self.audit_commit(created, job["id"])
             if created:
                 document = self.server.store.document_info(session_id, document_id, purpose)
                 document_kind = document["document_kind"] if purpose == "management" else None
@@ -1333,9 +1448,9 @@ class Handler(BaseHTTPRequestHandler):
                 target = run_real_job if scenario == "real" else run_job
                 arguments = (self.server.store, job["id"], document_id, adapter)
                 if scenario == "real":
-                    arguments += (self.server.real_job_slot, document_kind)
+                    arguments += (self.server.real_job_slot, document_kind, self.trace_id())
                 else:
-                    arguments += (document_kind,)
+                    arguments += (document_kind, self.trace_id())
                 threading.Thread(target=target, args=arguments, daemon=True).start()
             self.json_response(202 if created else 200, job)
             return
@@ -1344,6 +1459,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         if not self.valid_host() or not self.valid_origin():
             return
+        self.audit_http("received")
         if self.headers.get("X-Orderflow-Request") != "1":
             self.error(403, "REQUEST_HEADER_REQUIRED")
             return
@@ -1366,6 +1482,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         if not self.valid_host():
             return
+        self.audit_http("received")
         session_id = self.get_session()
         if not session_id or not self.valid_origin():
             return
@@ -1405,6 +1522,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(409 if code in conflicts else 400,
                            code if code in allowed else "RECORD_ROWS_INVALID")
                 return
+            self.audit_commit(created)
             self.json_response(201 if created else 200, record)
             return
         if not path.startswith(PREFIX + "api/management/drafts/"):
@@ -1432,6 +1550,7 @@ class Handler(BaseHTTPRequestHandler):
                        code if code in {"DRAFT_VERSION_CONFLICT", "DRAFT_VERSION_INVALID",
                                         "DRAFT_ROWS_INVALID"} else "DRAFT_ROWS_INVALID")
             return
+        self.audit_commit(created)
         self.json_response(201 if created else 200, draft)
 
     do_PATCH = _unsupported_api_method
@@ -1508,6 +1627,7 @@ class Handler(BaseHTTPRequestHandler):
             self.error(507 if code == "STORAGE_LIMIT" else 409,
                        "STORAGE_LIMIT" if code == "STORAGE_LIMIT" else "IDEMPOTENCY_CONFLICT")
             return
+        self.audit_commit(not doc["duplicate"] if "duplicate" in doc else None)
         self.json_response(201, doc)
 
 

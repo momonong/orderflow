@@ -17,7 +17,7 @@ async function check(clipboard) {
   vm.runInContext(source, context);
   vm.runInContext('currentDocument = {id: \"doc\", size: 400, page_count: 1, name: \"PRIVATE_PDF_FILENAME\", secret: \"API_SECRET\"}; currentJob = {id: \"job\", raw_response: \"RAW_AI_RESPONSE\"}; updateReport()', context);
   assert.match(report.value, /辨識模式：固定資料模擬/);
-  assert.doesNotMatch(report.value, /PRIVATE_PDF_FILENAME|RAW_AI_RESPONSE|API_SECRET/);
+  assert.doesNotMatch(report.value, /PRIVATE_PDF_FILENAME|RAW_AI_RESPONSE|API_SECRET|TestBrowser\/1/);
   await vm.runInContext('copyReport()', context);
   return {report, status, details};
 }

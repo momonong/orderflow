@@ -105,5 +105,15 @@ context.api = async (path, options) => {
   assert.equal(calls.length, 2, 'a second user confirmation is required');
   assert.equal(calls[0].body.request_key, calls[1].body.request_key,
     'explicit retry after unknown result retains the original paid-job idempotency key');
+  const report = el('diagnostic-report');
+  const details = {open: false};
+  report.closest = () => details;
+  report.focus = () => {report.focused = true;};
+  report.select = () => {report.selected = true;};
+  context.navigator = {clipboard: {writeText: async () => {throw Error('denied');}}};
+  await vm.runInContext('copyDiagnosticReport()', context);
+  assert.equal(details.open, true);
+  assert.equal(report.selected, true);
+  assert.match(el('diagnostic-copy-status').textContent, /手動|Ctrl/);
   console.log('management save, refresh, paid confirmation and uncertain retry: ok');
 })().catch(error => {console.error(error); process.exitCode = 1;});

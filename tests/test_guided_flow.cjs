@@ -38,6 +38,10 @@ vm.runInContext('renderRows = () => { $("sample-body").textContent = "中文 <�
   assert.equal(nonJson.status, 502);
   assert.equal(nonJson.responseType, 'HTML');
   assert.equal(typeof nonJson.ms, 'number');
+  const jobNonJson = await originalApi('jobs/00000000-0000-4000-8000-000000000000', {}, 1000)
+    .then(() => null, error => error);
+  assert.equal(jobNonJson.code, 'BAD_JSON_RESPONSE');
+  assert.equal(jobNonJson.responseType, 'HTML');
   context.syntheticError = nonJson;
   vm.runInContext('aiKeyConfigured = true; updateRealControls = () => {}; api = async () => { throw syntheticError; };', context);
   await vm.runInContext('checkKey()', context);
@@ -46,7 +50,9 @@ vm.runInContext('renderRows = () => { $("sample-body").textContent = "中文 <�
   assert.match(elements.report.value, /請求識別 00000000-0000-4000-8000-000000000000/);
   assert.match(elements.report.value, /BAD_JSON_RESPONSE/);
   context.fetch = async () => ({status: 502, ok: false,
-    headers: {get: (name) => name === 'X-Orderflow-Origin' ? 'app' : 'application/json'},
+    headers: {get: (name) => name === 'X-Orderflow-Origin' ? 'app'
+      : name === 'X-Orderflow-Request-Id' ? '00000000-0000-4000-8000-000000000000'
+      : 'application/json'},
     json: async () => ({error_code: 'AI_BAD_REQUEST', upstream_http_status: 400,
       upstream_reason: 'INVALID_ARGUMENT', message: 'private raw upstream message'})});
   const appJson = await originalApi('key/check', {method: 'POST'}, 1000).then(() => null, (error) => error);

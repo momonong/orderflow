@@ -36,6 +36,10 @@ function keyInputError(value) {
   return null;
 }
 const uuid = () => crypto.randomUUID();
+const diagnostics = window.OrderflowDiagnostics?.create(apiBase) || {
+  record() {}, flush() {}, summary() { return "瀏覽器事件記錄未載入。"; },
+  newOperation() { return uuid(); }, get traceId() { return ""; }
+};
 function status(id, message, kind = "") { el(id).textContent = message; el(id).dataset.state = kind; }
 function safeError(error) {
   const parts = [error.code || "NETWORK_ERROR"];
@@ -49,18 +53,34 @@ function safeError(error) {
 }
 async function api(path, options = {}, timeoutMs = 10000) {
   const requestId = uuid();
+  const started = Date.now();
+  let appReached = false;
+  let canReport = false;
+  diagnostics.record("send", path, {requestId});
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(apiBase + path, { ...options, signal: controller.signal,
       credentials: "same-origin", cache: "no-store",
-      headers: {...options.headers, "X-Orderflow-Request": "1", "X-Orderflow-Request-Id": requestId} });
+      headers: {...options.headers, "X-Orderflow-Request": "1",
+        "X-Orderflow-Request-Id": requestId, "X-Orderflow-Trace-Id": diagnostics.traceId} });
     const appMarker = response.headers.get("X-Orderflow-Origin") === "app" ? "APP" : "MISSING";
+    appReached = appMarker === "APP";
+    canReport = appReached && response.status !== 401 && path !== "logout";
     const type = (response.headers.get("Content-Type") || "").split(";", 1)[0].toLowerCase();
+    const responseType = type === "application/json" ? "JSON" :
+      type === "text/html" ? "HTML" : type === "text/plain" ? "TEXT" : type ? "OTHER" : "MISSING";
+    diagnostics.record("http_received", path, {requestId, httpStatus: response.status,
+      responseType, durationMs: Date.now() - started});
+    diagnostics.record("marker_checked", path, {requestId, marker: appMarker});
+    if (appReached && response.headers.get("X-Orderflow-Request-Id") !== requestId)
+      throw {code: "REQUEST_ID_MISMATCH", status: response.status, appMarker,
+        responseType, requestId, unknown: true};
     let data;
     try { data = await response.json(); }
     catch { throw {code: "BAD_JSON_RESPONSE", status: response.status, appMarker,
-      responseType: type === "text/html" ? "HTML" : type || "MISSING", requestId}; }
+      responseType, requestId}; }
+    diagnostics.record("json_parsed", path, {requestId, httpStatus: response.status});
     if (!response.ok) {
       if (response.status === 401 && path !== "login") {
         const recordSave = path.startsWith("management/record-sets/");
@@ -80,10 +100,27 @@ async function api(path, options = {}, timeoutMs = 10000) {
     }
     return data;
   } catch (error) {
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", requestId, unknown: true};
-    if (error?.code) throw error;
-    throw {code: "NETWORK_ERROR", requestId, unknown: true};
-  } finally { clearTimeout(timer); }
+    const failure = error?.name === "AbortError"
+      ? {code: "REQUEST_TIMEOUT", requestId, unknown: true}
+      : error?.code ? error : {code: "NETWORK_ERROR", requestId, unknown: true};
+    diagnostics.record(failure.code === "BAD_JSON_RESPONSE" ? "json_failed" : "request_unknown",
+      path, {requestId, code: failure.code, durationMs: Date.now() - started});
+    throw failure;
+  } finally { clearTimeout(timer); void diagnostics.flush(canReport); }
+}
+async function copyDiagnosticReport() {
+  const field = el("diagnostic-report");
+  field.value = diagnostics.summary();
+  try {
+    if (!navigator.clipboard?.writeText) throw Error("unavailable");
+    await navigator.clipboard.writeText(field.value);
+    status("diagnostic-copy-status", "已複製診斷資訊。", "good");
+  } catch {
+    const details = field.closest?.("details");
+    if (details) details.open = true;
+    field.focus(); field.select();
+    status("diagnostic-copy-status", "無法自動複製；已選取內容，請按 Ctrl/Cmd+C。", "unknown");
+  }
 }
 function showLogin(message = "請輸入網站密碼。", preserveEditor = false) {
   keyWorkspaceShown = false;
@@ -203,8 +240,8 @@ function clearDraft() {
   state.job = null; state.localSource = null; state.rows = []; state.revision = 0; state.dirty = false;
   el("rows").replaceChildren(); status("job-status", "尚未啟動。");
   clearJobErrorTools();
-  el("draft-source").textContent = "完成真正辨識後，才會在這裡顯示可編修的品項。";
-  status("draft-status", "尚無管理草稿。未儲存的編修在重新整理後會消失。");
+  el("draft-source").textContent = "讀取 PDF 或完成辨識後，這裡會顯示可核對的品項。";
+  status("draft-status", "尚未儲存。未儲存的修改在重新整理後會消失。");
   renderJobs(); refreshControls();
 }
 function editRows(rows) {
@@ -237,8 +274,11 @@ function utcTime(value) {
 function jobErrorSummary(job) {
   const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const id = typeof job.id === "string" && validUuid.test(job.id) ? job.id : "unknown";
-  const code = typeof job.error_code === "string" && /^[A-Z0-9_]{2,40}$/.test(job.error_code)
-    ? job.error_code : "UNKNOWN";
+  const safeCodes = new Set(["AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED",
+    "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED",
+    "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN",
+    "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN"]);
+  const code = safeCodes.has(job.error_code) ? job.error_code : "UNKNOWN";
   const created = utcTime(job.created_ms);
   const started = utcTime(job.started_ms);
   const finished = utcTime(job.finished_ms);
@@ -251,11 +291,14 @@ function jobErrorSummary(job) {
     ? String(steps.upstream_http_status) : "unknown";
   const upstreamReason = ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"]
     .includes(steps.upstream_reason) ? steps.upstream_reason : "unknown";
+  const transportClass = ["DNS", "TLS", "CONNECT_REFUSED", "TIMEOUT_UNKNOWN",
+    "IO_UNKNOWN", "HTTP_TRUNCATED", "HTTP_MALFORMED"].includes(steps.transport_class)
+    ? steps.transport_class : "unknown";
   return ["OrderFlow 辨識錯誤資訊", `job_id: ${id}`,
     `state: ${job.state === "failed" ? "failed" : "unknown"}`, `error_code: ${code}`,
     `created_utc: ${created}`, `started_utc: ${started}`, `finished_utc: ${finished}`,
     `elapsed_ms: ${elapsed}`, `upstream_http_status: ${upstreamStatus}`,
-    `upstream_reason: ${upstreamReason}`].join("\n");
+    `upstream_reason: ${upstreamReason}`, `transport_class: ${transportClass}`].join("\n");
 }
 function clearJobErrorTools() {
   el("job-error-tools").hidden = true;
@@ -290,9 +333,15 @@ function selectJob(id) {
   if (!job) { clearDraft(); return; }
   state.job = job; state.localSource = null; state.localPreview = null;
   renderJobs(); renderJobErrorTools(job);
+  diagnostics.record("job_rendered", `management/jobs/${id}`);
+  void diagnostics.flush(true);
   if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
     clearDraftEditor(); pollJob(id); return; }
-  if (job.state !== "done") { status("job-status", `辨識${job.state === "unknown" ? "結果不明" : "失敗"}：${job.error_code || "UNKNOWN"}${job.steps?.upstream_http_status ? ` · Google HTTP ${job.steps.upstream_http_status}` : ""}${job.steps?.upstream_reason ? ` · ${job.steps.upstream_reason}` : ""}。請求可能已送達 Google 並計費；請勿連續按辨識。系統不會自動重試。`, job.state === "unknown" ? "unknown" : "error");
+  if (job.state !== "done") { status("job-status",
+    job.state === "unknown"
+      ? "辨識結果不明。請求可能已送達 Google 並計費；請勿連續按辨識。稍後重新載入，若仍不清楚請複製下方資訊。"
+      : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。",
+    job.state === "unknown" ? "unknown" : "error");
     clearDraftEditor(); return; }
   status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
   const selectedDoc = state.documents.find(doc => doc.id === state.selected);
@@ -387,7 +436,7 @@ function activateLocalPreview(preserveRows = false) {
   const hints = preview.hints;
   el("local-hints").hidden = false;
   el("local-hints").textContent = `來源提示：廠商 ${hints.supplier}；備註 ${hints.remark || "無"}；預進貨日 ${hints.expectedArrivals.join("、")}；數量合計 ${hints.quantityTotal}（${hints.missingUnits} 筆單位空白）；金額合計 ${hints.documentTotal}。備註及預進貨日不會被當作訂單日期或貿易條件。`;
-  el("draft-source").textContent = `本機解析 ${preview.parserId} · ${preview.candidateRows.length} 筆候選；尚未上傳或儲存。`;
+  el("draft-source").textContent = `已讀到 ${preview.candidateRows.length} 筆；請核對，尚未儲存。`;
   el("save-draft").textContent = "確認並儲存記錄";
   editRecordRows();
   status("draft-status", "請核對每欄，尤其空白單位；確認後 PDF 與人工記錄才會送到網站主機保存。", "unknown");
@@ -430,7 +479,7 @@ async function parseLocal() {
       candidateRows: result.rows.map(row => makeRecordRow(row, result.kind)), hints: result.hints,
       uploadKey: uuid(), sourceKey: uuid()};
     activateLocalPreview();
-    status("local-status", `已在瀏覽器解析 ${result.rows.length} 筆；尚未上傳或儲存。`, "good");
+    status("local-status", `已讀到 ${result.rows.length} 筆。請核對後儲存；目前尚未儲存。`, "good");
   } catch (error) {
     status("local-status", localErrorMessages[error?.code] || localErrorMessages.LOCAL_PDF_UNREADABLE,
       error?.code === "LOCAL_CANCELLED" ? "unknown" : "error");
@@ -443,6 +492,7 @@ async function saveLocalPreview(rows) {
   const preview = state.localPreview;
   if (!preview || state.busy) return;
   const serial = state.editSerial;
+  diagnostics.newOperation();
   state.busy = true; refreshControls();
   status("draft-status", "正在上傳 PDF 並保存人工確認記錄…");
   try {
@@ -536,6 +586,7 @@ async function clearKey() {
 async function recognize() {
   if (!state.selected || !state.key || state.busy) return;
   if (!window.confirm("將這份 PDF 傳給 Google 辨識，可能使用你的 API 額度。確定送出？")) return;
+  diagnostics.newOperation();
   state.busy = true; refreshControls(); status("job-status", "正在建立辨識工作…");
   const documentId = state.selected;
   const requestKey = state.pendingJobKeys.get(documentId) || uuid();
@@ -1126,6 +1177,7 @@ el("set-key").addEventListener("click", setKey);
 el("clear-key").addEventListener("click", clearKey);
 el("recognize").addEventListener("click", recognize);
 el("copy-job-error").addEventListener("click", copyJobError);
+el("copy-diagnostic").addEventListener("click", copyDiagnosticReport);
 el("add-row").addEventListener("click", () => {
   if (state.rows.length >= 100) return;
   const kind = selectedDocumentKind();

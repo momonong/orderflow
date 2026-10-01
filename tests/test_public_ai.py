@@ -1,9 +1,12 @@
 import hashlib
+from contextlib import redirect_stderr
 from concurrent.futures import ThreadPoolExecutor
 import http.client
 import io
 import json
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -18,7 +21,7 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 from orderflow.ai import AIError, AIUnknown
-from orderflow.app import AppServer, Store
+from orderflow.app import AppServer, Handler, Store
 from orderflow.gemini import GeminiAdapter, MODEL, _generate
 
 ORIGIN = "https://momonong.me"
@@ -116,6 +119,76 @@ class PublicAiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"app.js", diagnostic)
         self.assertEqual(self.request("GET", "/orderflow/test")[0], 308)
+
+    def test_diagnostic_reports_are_authenticated_bounded_and_content_free(self):
+        trace = str(uuid.uuid4())
+        request = str(uuid.uuid4())
+        event = {"phase": "http_received", "route": "management_jobs",
+                 "trace_id": trace, "request_id": request, "http_status": 502,
+                 "response_type": "HTML", "marker": "MISSING"}
+        log = io.StringIO()
+        with redirect_stderr(log):
+            status, _, _ = self.request("POST", "/orderflow/api/diagnostics",
+                                         json.dumps({"events": [event]}),
+                                         {"Content-Type": "application/json"},
+                                         "of_session=invalid")
+            self.assertEqual(status, 401)
+            status, data, _ = self.post_json("/orderflow/api/diagnostics", {"events": [event]})
+            self.assertEqual((status, data["status"]), (200, "recorded"))
+            for bad in (
+                {**event, "pdf_text": "PRIVATE_PDF_SENTINEL"},
+                {**event, "code": "PRIVATE_KEY_SENTINEL"},
+                {**event, "route": ["management_jobs"]},
+                {**event, "phase": ["http_received"]},
+            ):
+                status, _, _ = self.post_json("/orderflow/api/diagnostics", {"events": [bad]})
+                self.assertEqual(status, 400)
+            for _ in range(11):
+                self.assertEqual(self.post_json("/orderflow/api/diagnostics",
+                                                {"events": [event]})[0], 200)
+            self.assertEqual(self.post_json("/orderflow/api/diagnostics",
+                                            {"events": [event]})[0], 429)
+        output = log.getvalue()
+        self.assertIn('"event":"client_observation"', output)
+        self.assertIn(trace, output)
+        self.assertNotIn("PRIVATE_PDF_SENTINEL", output)
+        self.assertNotIn("PRIVATE_KEY_SENTINEL", output)
+        self.assertNotIn(FAKE_KEY, output)
+
+    def test_trace_response_matches_request_and_commit_precedes_response(self):
+        trace = str(uuid.uuid4())
+        request = str(uuid.uuid4())
+        log = io.StringIO()
+        with patch("orderflow.diagnostics._MAX_EVENTS", 100000), redirect_stderr(log):
+            status, _, _ = self.request("POST", "/orderflow/api/documents", PDF, {
+                "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+                "X-File-SHA256": hashlib.sha256(PDF).hexdigest(),
+                "X-Request-Key": str(uuid.uuid4()),
+                "X-Orderflow-Request-Id": request,
+                "X-Orderflow-Trace-Id": trace,
+            }, self.cookie)
+        self.assertEqual(status, 201)
+        self.assertEqual(self.last_headers["X-Orderflow-Request-Id"], request)
+        self.assertEqual(self.last_headers["X-Orderflow-Trace-Id"], trace)
+        records = [json.loads(line.removeprefix("orderflow_audit "))
+                   for line in log.getvalue().splitlines()
+                   if line.startswith("orderflow_audit ")]
+        phases = [record["phase"] for record in records if record.get("id") == request]
+        self.assertLess(phases.index("db_committed"), phases.index("response_written"))
+
+    def test_response_write_disconnect_is_unknown_after_store_confirmation(self):
+        class BrokenWriter:
+            def write(self, _data):
+                raise BrokenPipeError
+        handler = object.__new__(Handler)
+        handler.wfile = BrokenWriter()
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        phases = []
+        handler.audit_http = lambda phase, status: phases.append((phase, status))
+        handler.json_response(201, {"status": "saved"})
+        self.assertEqual(phases, [("response_write_unknown", 201)])
 
     def test_app_response_marker_and_safe_google_check_reason(self):
         request_id = str(uuid.uuid4())
@@ -409,6 +482,19 @@ class PublicAiTests(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertEqual((state["state"], state["error_code"]), ("failed", "AI_RATE_LIMITED"))
+        with patch.object(GeminiAdapter, "recognize",
+                          side_effect=AIUnknown("AI_HTTP_UNKNOWN", upstream_http_status=503)):
+            status, job, _ = self.post_json("/orderflow/api/jobs", {
+                "document_id": document["id"], "request_key": str(uuid.uuid4()), "scenario": "real"})
+            self.assertEqual(status, 202)
+            for _ in range(40):
+                state = self.request("GET", "/orderflow/api/jobs/" + job["id"], cookie=self.cookie)[1]
+                if state["state"] not in {"queued", "running"}:
+                    break
+                time.sleep(0.05)
+            self.assertEqual((state["state"], state["error_code"],
+                              state["steps"]["upstream_http_status"]),
+                             ("unknown", "AI_HTTP_UNKNOWN", 503))
 
     def test_new_server_does_not_restore_key(self):
         self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
@@ -673,10 +759,30 @@ class GeminiAdapterTests(unittest.TestCase):
             with self.assertRaises(AIUnknown) as caught:
                 _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
             self.assertEqual(caught.exception.code, "AI_TIMEOUT_UNKNOWN")
+            self.assertEqual(caught.exception.transport_class, "TIMEOUT_UNKNOWN")
+        for reason, category in [
+            (socket.gaierror("secret DNS"), "DNS"),
+            (ssl.SSLError("secret TLS"), "TLS"),
+            (ConnectionRefusedError("secret connect"), "CONNECT_REFUSED"),
+        ]:
+            with self.subTest(category=category), patch(
+                    "orderflow.gemini.urllib.request.urlopen",
+                    side_effect=urllib.error.URLError(reason)):
+                with self.assertRaises(AIUnknown) as caught:
+                    _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
+                self.assertEqual(caught.exception.transport_class, category)
+                self.assertNotIn("secret", str(caught.exception))
         with patch("orderflow.gemini.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"", 1)):
             with self.assertRaises(AIUnknown) as caught:
                 _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
             self.assertEqual(caught.exception.code, "AI_HTTP_UNKNOWN")
+            self.assertEqual(caught.exception.transport_class, "HTTP_TRUNCATED")
+        with patch("orderflow.gemini.urllib.request.urlopen",
+                   side_effect=urllib.error.HTTPError("url", 503, "secret", {}, None)):
+            with self.assertRaises(AIUnknown) as caught:
+                _generate(FAKE_KEY, [{"text": "test"}], timeout=1, structured=False)
+            self.assertEqual(caught.exception.upstream_http_status, 503)
+            self.assertNotIn("secret", str(caught.exception))
         class BadResponse:
             def __enter__(self): return self
             def __exit__(self, *args): return None

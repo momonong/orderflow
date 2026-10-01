@@ -9,6 +9,10 @@ const steps = Object.fromEntries(names.map((name) => [name, {status: "not_run"}]
 steps.page = {status: "pass"};
 steps.script = {status: "pass"};
 const testId = crypto.randomUUID();
+const diagnostics = (typeof window !== "undefined" && window.OrderflowDiagnostics?.create(base)) || {
+  record() {}, flush() {}, summary() { return "瀏覽器事件記錄未載入。"; },
+  newOperation() {}, get traceId() { return testId; }
+};
 let version = "0.3.0";
 let maxBytes = 8 * 1024 * 1024;
 let documents = [];
@@ -199,23 +203,51 @@ function responseTypeHint(value) {
 function safeUpstreamReason(value) {
   return ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"].includes(value) ? value : undefined;
 }
+const reportCodes = new Set(["BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIMEOUT",
+  "REQUEST_ID_MISMATCH", "HTTP_ERROR", "ECHO_MISMATCH", "SAMPLE_RENDER_FAILED",
+  "RECEIPT_MISMATCH", "POLL_DEADLINE", "RENDER_FAILED", "AI_UNAVAILABLE",
+  "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR",
+  "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST",
+  "AI_HTTP_UNKNOWN", "KEY_REQUIRED", "JOB_LIMIT", "UPLOAD_INCOMPLETE",
+  "PDF_INVALID", "PDF_REQUIRED", "BAD_SIZE", "FILE_TOO_LARGE", "STORAGE_LIMIT",
+  "UPLOAD_BUSY", "HASH_MISMATCH", "SIZE_MISMATCH", "PDF_CHECK_TIMEOUT",
+  "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "SESSION_EXPIRED"]);
+function reportUuid(value) {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+    ? value : "無";
+}
 async function api(path, options = {}, timeoutMs = 5000) {
   const started = performance.now();
   const requestId = crypto.randomUUID();
+  let appReached = false;
+  let canReport = false;
+  diagnostics.record("send", path, {requestId});
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(base + path, {
       ...options, signal: controller.signal,
       headers: {...options.headers, "X-Orderflow-Request": "1",
-                "X-Orderflow-Request-Id": requestId},
+                "X-Orderflow-Request-Id": requestId,
+                "X-Orderflow-Trace-Id": diagnostics.traceId},
       credentials: "same-origin", cache: "no-store"
     });
     const appMarker = response.headers.get("X-Orderflow-Origin") === "app" ? "APP" : "MISSING";
+    appReached = appMarker === "APP";
+    canReport = appReached && response.status !== 401 && path !== "logout";
+    const responseType = responseTypeHint(response.headers.get("Content-Type"));
+    diagnostics.record("http_received", path, {requestId, httpStatus: response.status,
+      responseType, durationMs: Math.round(performance.now() - started)});
+    diagnostics.record("marker_checked", path, {requestId, marker: appMarker});
+    if (appReached && response.headers.get("X-Orderflow-Request-Id") !== requestId)
+      throw {code: "REQUEST_ID_MISMATCH", status: response.status, requestId,
+        appMarker, responseType, unknown: true};
     let data;
     try { data = await response.json(); }
     catch { throw {code: "BAD_JSON_RESPONSE", status: response.status, requestId, appMarker,
-                   responseType: responseTypeHint(response.headers.get("Content-Type"))}; }
+                   responseType}; }
+    diagnostics.record("json_parsed", path, {requestId, httpStatus: response.status});
     if (!response.ok) {
       if (response.status === 401 && path !== "login" && path !== "logout") {
         showLogin(data.error_code === "SESSION_EXPIRED" ? "登入已過期，請重新輸入網站密碼。" : undefined);
@@ -230,10 +262,13 @@ async function api(path, options = {}, timeoutMs = 5000) {
     return {data, status: response.status, requestId};
   } catch (error) {
     const ms = Math.round(performance.now() - started);
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", unknown: true, ms, requestId};
-    if (error?.code) throw {...error, ms};
-    throw {code: "NETWORK_ERROR", unknown: true, ms, requestId};
-  } finally { clearTimeout(timer); }
+    const failure = error?.name === "AbortError"
+      ? {code: "REQUEST_TIMEOUT", unknown: true, ms, requestId}
+      : error?.code ? {...error, ms} : {code: "NETWORK_ERROR", unknown: true, ms, requestId};
+    diagnostics.record(failure.code === "BAD_JSON_RESPONSE" ? "json_failed" : "request_unknown",
+      path, {requestId, code: failure.code, durationMs: ms});
+    throw failure;
+  } finally { clearTimeout(timer); void diagnostics.flush(canReport); }
 }
 function renderRows(tbody, rows) {
   tbody.replaceChildren();
@@ -252,27 +287,30 @@ function updateReport() {
     `OrderFlow 診斷報告 v${version}`,
     `時間：${new Date().toISOString()}`,
     `測試識別：${testId}`,
-    `瀏覽器：${navigator.userAgent}`,
-    `文件識別：${currentDocument?.id || "無"}`,
-    `工作識別：${currentJob?.id || "無"}`,
-    `檔案大小：${currentDocument?.size ?? "未知"} bytes`,
-    `頁數：${currentDocument?.page_count ?? "未取得"}`,
+    `文件識別：${reportUuid(currentDocument?.id)}`,
+    `工作識別：${reportUuid(currentJob?.id)}`,
     `辨識模式：${currentJob?.mode === "real" ? "Google Gemini PDF 請求；內容仍需人工核對" : "固定資料模擬"}`,
     "步驟："
   ];
   for (const name of names) {
     const entry = steps[name];
     const extras = [];
-    if (entry.ms !== undefined) extras.push(`${entry.ms} ms`);
-    if (entry.http !== undefined) extras.push(`HTTP ${entry.http}`);
-    if (entry.responseType) extras.push(`回應類型 ${entry.responseType}`);
-    if (entry.appMarker) extras.push(`應用標記 ${entry.appMarker}`);
-    if (entry.requestId) extras.push(`請求識別 ${entry.requestId}`);
-    if (entry.upstreamStatus) extras.push(`上游 HTTP ${entry.upstreamStatus}`);
-    if (entry.upstreamReason) extras.push(`上游分類 ${entry.upstreamReason}`);
-    if (entry.code) extras.push(entry.code);
+    if (Number.isInteger(entry.ms) && entry.ms >= 0 && entry.ms <= 120000)
+      extras.push(`${entry.ms} ms`);
+    if (Number.isInteger(entry.http) && entry.http >= 100 && entry.http <= 599)
+      extras.push(`HTTP ${entry.http}`);
+    if (["JSON", "HTML", "TEXT", "OTHER", "MISSING"].includes(entry.responseType))
+      extras.push(`回應類型 ${entry.responseType}`);
+    if (["APP", "MISSING"].includes(entry.appMarker))
+      extras.push(`應用標記 ${entry.appMarker}`);
+    if (reportUuid(entry.requestId) !== "無") extras.push(`請求識別 ${entry.requestId}`);
+    if (Number.isInteger(entry.upstreamStatus) && entry.upstreamStatus >= 100 &&
+        entry.upstreamStatus <= 599) extras.push(`上游 HTTP ${entry.upstreamStatus}`);
+    if (safeUpstreamReason(entry.upstreamReason)) extras.push(`上游分類 ${entry.upstreamReason}`);
+    if (reportCodes.has(entry.code)) extras.push(entry.code);
     lines.push(`- ${titles[name]}：${labels[entry.status]}${extras.length ? "（" + extras.join("，") + "）" : ""}`);
   }
+  lines.push(diagnostics.summary());
   lines.push("限制：Google 模型可用性依金鑰；辨識內容需人工核對。公司瀏覽器與資料外傳許可尚未驗證。網站無法載入時請由人提供錯誤截圖與時間。");
   $("report").value = lines.join("\n");
 }
@@ -336,6 +374,7 @@ function showJob(job) {
     } catch {
       renderRows($("result-body"), []);
       mark("render", "fail", {code: "RENDER_FAILED"});
+      diagnostics.record("render_failed", "jobs/" + job.id, {code: "RENDER_FAILED"});
       setStatus("ai-status", "結果未能顯示。請複製測試報告傳回提供連結的人。", "fail");
       nextStep("結果顯示有問題。請到步驟 4 複製報告。");
     }
@@ -355,9 +394,12 @@ function showJob(job) {
     }
   }
   if (job.mode === "real") setStatus("real-status", $("ai-status").textContent, $("ai-status").dataset.state);
+  diagnostics.record("job_rendered", "jobs/" + job.id);
+  void diagnostics.flush(true);
   if (!["queued", "running"].includes(job.state)) reportReady();
 }
 async function runBasic() {
+  diagnostics.newOperation();
   $("basic-button").disabled = true;
   setStatus("basic-status", "正在檢查連線，請稍候……", "working");
   nextStep("正在確認連線，請稍候。");
@@ -412,6 +454,7 @@ async function upload() {
   if (!file) { setStatus("upload-status", "請先選擇一份沒有客戶資料的測試 PDF。", "fail"); return; }
   if (file.size > maxBytes || file.size < 1) { updateUploadChoice(); return; }
   if (!window.confirm("這份測試 PDF 會上傳並保存在提供此網站的電腦。請確認沒有客戶或個人資料；要繼續嗎？")) return;
+  diagnostics.newOperation();
   uploadBusy = true;
   $("upload-button").disabled = true;
   setStatus("upload-status", "正在檢查並上傳，請稍候，不需要再按一次。", "working");
@@ -533,6 +576,7 @@ function runReal() {
 async function recognize(rerun = false, real = false) {
   if (!currentDocument || jobBusy || real && !aiKeyConfigured) return;
   if (!rerun && currentJob) { await pollJob(currentJob.id); return; }
+  diagnostics.newOperation();
   jobBusy = true;
   jobSubmitUnknown = false;
   $("recognize-button").disabled = true;
