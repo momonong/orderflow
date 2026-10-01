@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>OrderFlow 物流管理</title>
   <link rel="stylesheet" href="/orderflow/manage.css">
+  <script src="/orderflow/diagnostics.js" defer></script>
   <script src="/orderflow/manage.js" defer></script>
 </head>
 <body>
@@ -54,8 +55,16 @@
         </section>
         <section id="page-upload" class="page" aria-labelledby="upload-page-title" hidden>
           <div class="page-heading"><h1 id="upload-page-title">PDF 上傳</h1></div>
+          <section class="card" aria-labelledby="local-title"><div class="card-heading"><h2 id="local-title">本機解析（不使用 AI）</h2></div><div class="card-body">
+            <p><strong>三步驟：</strong>選科雅採購憑單 PDF → 讀取品項 → 核對後按「確認並儲存記錄」。讀取時檔案留在此瀏覽器；按下儲存後才送到網站主機，不會送 Google。</p>
+            <details><summary>支援格式與資料處理細節</summary><p>目前僅支援有文字層的單頁科雅採購憑單，最多 8 MB。選檔與解析在此瀏覽器完成；解析時 PDF 不傳至網站主機或 Google。核對品項後按「確認並儲存記錄」，才會把 PDF 與人工確認記錄送至網站主機保存。</p></details>
+            <label for="local-pdf">選擇採購憑單 PDF</label><input id="local-pdf" type="file" accept="application/pdf,.pdf">
+            <div class="actions"><button id="local-parse" type="button">在瀏覽器解析</button><button id="local-cancel" class="quiet" type="button" disabled>取消解析</button></div>
+            <p id="local-status" class="status" role="status">尚未選檔。</p><p id="local-hints" class="muted" hidden></p>
+          </div></section>
           <section class="card" aria-labelledby="key-title"><div class="card-heading"><h2 id="key-title">Google AI 金鑰</h2><span id="key-chip" class="badge">未設定</span></div><div class="card-body">
-            <p id="key-help" class="muted"><strong>Google AI Studio API key 不是網站密碼。</strong>金鑰僅在網站主機記憶體保存 15 分鐘，重啟後清除。輸入形式通過不代表有效；可至診斷測試頁明確執行文字連線檢查。</p>
+            <p id="key-help" class="muted"><strong>這是使用 Google 辨識時才需要的金鑰，不是網站密碼。</strong></p>
+            <details><summary>金鑰保存與連線檢查</summary><p>金鑰只在網站主機記憶體保存 15 分鐘，重啟後清除。輸入形式通過不代表有效；可至診斷測試頁明確執行文字連線檢查。</p></details>
             <div class="key-row"><label for="ai-key">API Key</label><input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly><button id="set-key" type="button">套用金鑰</button><button id="clear-key" class="quiet" type="button">清除金鑰</button></div>
             <p id="key-status" class="status" role="status">尚未設定。</p>
           </div></section>
@@ -83,9 +92,15 @@
             <div id="jobs" class="job-list"></div>
           </div></section>
           <section class="card" aria-labelledby="draft-title"><div class="card-heading"><h2 id="draft-title">核對並儲存</h2></div><div class="card-body">
-            <p id="draft-source">完成真正辨識後，才會在這裡顯示可編修的品項。</p><div id="record-errors" class="record-errors" role="alert" tabindex="-1" hidden></div><div id="rows"></div>
+            <p id="draft-source">讀取 PDF 或完成辨識後，這裡會顯示可核對的品項。</p><div id="record-errors" class="record-errors" role="alert" tabindex="-1" hidden></div><div id="rows"></div>
             <div class="actions"><button id="add-row" type="button" disabled>新增一列</button><button id="save-draft" type="button" disabled>儲存草稿</button></div>
-            <p id="draft-status" class="status" role="status">尚無管理草稿。未儲存的編修在重新整理後會消失。</p>
+            <p id="draft-status" class="status" role="status">尚未儲存。未儲存的修改在重新整理後會消失。</p>
+          </div></section>
+          <section class="card" aria-labelledby="diagnostic-title"><div class="card-heading"><h2 id="diagnostic-title">遇到問題？</h2></div><div class="card-body">
+            <p>請先記下畫面顯示的狀態。若需要協助，可複製不含 PDF 內容與金鑰的診斷資訊，交給提供網站的人。</p>
+            <button id="copy-diagnostic" class="quiet" type="button">複製診斷資訊</button>
+            <p id="diagnostic-copy-status" class="status" role="status" aria-live="polite"></p>
+            <details><summary>查看診斷資訊</summary><textarea id="diagnostic-report" readonly rows="10" spellcheck="false"></textarea></details>
           </div></section>
         </section>
         <section id="page-orders" class="page" aria-labelledby="orders-title" hidden>

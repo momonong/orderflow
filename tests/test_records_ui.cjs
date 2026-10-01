@@ -217,7 +217,9 @@ context.api = async (path, options) => {
   vm.runInContext('state.rows[0].date="2026/9/22"; state.dirty=true; editRecordRows()', context);
   context.api = realApi;
   context.fetch = async () => ({status:401, ok:false, headers:{get(name) {
-    return name === 'X-Orderflow-Origin' ? 'app' : 'application/json';
+    return name === 'X-Orderflow-Origin' ? 'app'
+      : name === 'X-Orderflow-Request-Id' ? '00000000-0000-4000-8000-000000000001'
+      : 'application/json';
   }}, json:async () => ({error_code:'SESSION_EXPIRED'})});
   await vm.runInContext('saveRecordSet()', context);
   assert.equal(el('login').hidden, false);

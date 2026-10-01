@@ -26,7 +26,8 @@ from pypdf import PdfReader
 
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
-from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
+from .diagnostics import BUILD_ID, audit_event, client_report
+from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
 
 VERSION = "0.3.0"
@@ -42,6 +43,7 @@ KEY_TTL_SECONDS = 15 * 60
 PURPOSES = {"diagnostic", "management"}
 MAX_DRAFT_JSON_BYTES = 32 * 1024
 MAX_RECORD_JSON_BYTES = 128 * 1024
+LOCAL_PARSER_ID = "koya-purchase-v1"
 MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
 MAX_JOBS_PER_DOCUMENT = 10
@@ -50,6 +52,8 @@ SESSION_TTL_MS = 8 * 60 * 60 * 1000
 LOGIN_ATTEMPTS_PER_MINUTE = 5
 SAFE_AI_CODES = {"AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN"}
 SAFE_UPSTREAM_REASONS = {"INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"}
+SAFE_TRANSPORT_CLASSES = {"DNS", "TLS", "CONNECT_REFUSED", "TIMEOUT_UNKNOWN",
+                          "IO_UNKNOWN", "HTTP_TRUNCATED", "HTTP_MALFORMED"}
 
 
 def safe_ai_code(code: str, fallback: str) -> str:
@@ -63,17 +67,9 @@ def safe_ai_metadata(error: AIError) -> dict[str, int | str]:
         metadata["upstream_http_status"] = status
     if error.upstream_reason in SAFE_UPSTREAM_REASONS:
         metadata["upstream_reason"] = error.upstream_reason
+    if error.transport_class in SAFE_TRANSPORT_CLASSES:
+        metadata["transport_class"] = error.transport_class
     return metadata
-
-
-def audit_event(event: str, reference: str, phase: str,
-                metadata: dict[str, int | str] | None = None) -> None:
-    # Only fixed event/phase labels, canonical UUIDs, and whitelisted metadata.
-    record = {"event": event, "id": reference if valid_uuid(reference) else "invalid",
-              "phase": phase}
-    record.update(metadata or {})
-    print("orderflow_audit " + json.dumps(record, separators=(",", ":")),
-          file=sys.stderr, flush=True)
 
 
 def plausible_key_input(value: object) -> bool:
@@ -181,15 +177,44 @@ class Store:
                 document_kind TEXT NOT NULL CHECK (document_kind IN ('purchase_order','invoice')),
                 PRIMARY KEY (session_id, request_key)
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS management_local_sources (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+                request_key TEXT NOT NULL, parser_id TEXT NOT NULL,
+                candidate_rows_json TEXT NOT NULL, created_ms INTEGER NOT NULL,
+                UNIQUE(session_id, request_key)
+            )""")
             db.execute("""CREATE TABLE IF NOT EXISTS management_record_sets (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                 document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
-                source_job_id TEXT NOT NULL REFERENCES jobs(id),
+                source_job_id TEXT REFERENCES jobs(id),
+                source_local_id TEXT REFERENCES management_local_sources(id),
                 kind TEXT NOT NULL CHECK (kind IN ('purchase_order','invoice')),
                 rows_json TEXT NOT NULL,
                 revision INTEGER NOT NULL CHECK (revision > 0),
-                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL
+                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+                CHECK ((source_job_id IS NOT NULL) != (source_local_id IS NOT NULL))
             )""")
+            record_columns = {row[1] for row in db.execute("PRAGMA table_info(management_record_sets)")}
+            if "source_local_id" not in record_columns:
+                # Keep all existing Gemini records and revision IDs while adding a distinct local source.
+                db.execute("""CREATE TABLE management_record_sets_new (
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+                    source_job_id TEXT REFERENCES jobs(id),
+                    source_local_id TEXT REFERENCES management_local_sources(id),
+                    kind TEXT NOT NULL CHECK (kind IN ('purchase_order','invoice')),
+                    rows_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+                    created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+                    CHECK ((source_job_id IS NOT NULL) != (source_local_id IS NOT NULL))
+                )""")
+                db.execute("""INSERT INTO management_record_sets_new
+                    (id,session_id,document_id,source_job_id,source_local_id,kind,
+                     rows_json,revision,created_ms,updated_ms)
+                    SELECT id,session_id,document_id,source_job_id,NULL,kind,
+                           rows_json,revision,created_ms,updated_ms FROM management_record_sets""")
+                db.execute("DROP TABLE management_record_sets")
+                db.execute("ALTER TABLE management_record_sets_new RENAME TO management_record_sets")
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
         self.db_path.chmod(0o600)
@@ -523,9 +548,59 @@ class Store:
     @staticmethod
     def public_record_set(row: sqlite3.Row) -> dict:
         return {"id": row["id"], "document_id": row["document_id"],
-                "source_job_id": row["source_job_id"], "kind": row["kind"],
+                "source_job_id": row["source_job_id"], "source_local_id": row["source_local_id"],
+                "kind": row["kind"],
                 "rows": json.loads(row["rows_json"]), "revision": row["revision"],
                 "created_ms": row["created_ms"], "updated_ms": row["updated_ms"]}
+
+    @staticmethod
+    def public_local_source(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "document_id": row["document_id"],
+                "parser_id": row["parser_id"],
+                "candidate_rows": json.loads(row["candidate_rows_json"]),
+                "created_ms": row["created_ms"]}
+
+    def local_sources(self, session_id: str) -> list[dict]:
+        with self.db() as db:
+            rows = db.execute("SELECT l.* FROM management_local_sources l "
+                              "JOIN documents d ON d.id=l.document_id "
+                              "WHERE l.session_id=? AND d.session_id=? "
+                              "AND d.purpose='management' AND d.document_kind='purchase_order' "
+                              "ORDER BY l.created_ms DESC", (session_id, session_id)).fetchall()
+        return [self.public_local_source(row) for row in rows]
+
+    def add_local_source(self, session_id: str, document_id: str, request_key: str,
+                         parser_id: str, candidate_rows: object) -> tuple[dict, bool]:
+        if not valid_uuid(document_id) or not valid_uuid(request_key) or parser_id != LOCAL_PARSER_ID:
+            raise ValueError("LOCAL_SOURCE_INVALID")
+        checked = validate_rows(candidate_rows, "purchase_order")
+        encoded = json.dumps(checked, ensure_ascii=False, separators=(",", ":"))
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            document = db.execute("SELECT id FROM documents WHERE id=? AND session_id=? "
+                                  "AND purpose='management' AND document_kind='purchase_order' "
+                                  "AND page_count=1", (document_id, session_id)).fetchone()
+            if not document:
+                raise LookupError("LOCAL_DOCUMENT_NOT_FOUND")
+            saved = db.execute("SELECT source_job_id FROM management_record_sets "
+                               "WHERE document_id=? AND session_id=?", (document_id, session_id)).fetchone()
+            if saved and saved["source_job_id"] is not None:
+                raise ValueError("LOCAL_SOURCE_CONFLICT")
+            existing = db.execute("SELECT * FROM management_local_sources "
+                                  "WHERE (session_id=? AND request_key=?) OR document_id=?",
+                                  (session_id, request_key, document_id)).fetchone()
+            if existing:
+                if existing["session_id"] != session_id or existing["document_id"] != document_id or \
+                   existing["parser_id"] != parser_id or existing["candidate_rows_json"] != encoded:
+                    raise ValueError("LOCAL_SOURCE_CONFLICT")
+                return self.public_local_source(existing), False
+            source_id = str(uuid.uuid4())
+            db.execute("INSERT INTO management_local_sources "
+                       "(id,session_id,document_id,request_key,parser_id,candidate_rows_json,created_ms) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (source_id, session_id, document_id, request_key, parser_id, encoded, now_ms()))
+            row = db.execute("SELECT * FROM management_local_sources WHERE id=?", (source_id,)).fetchone()
+        return self.public_local_source(row), True
 
     def record_sets(self, session_id: str) -> list[dict]:
         with self.db() as db:
@@ -551,21 +626,30 @@ class Store:
             if invoice[field] is not None and order[field] is not None and invoice[field] != order[field]:
                 raise ValueError("RECORD_LINK_CONFLICT")
 
-    def save_record_set(self, session_id: str, document_id: str, source_job_id: str,
-                        expected_revision: int, rows: object) -> tuple[dict, bool]:
+    def save_record_set(self, session_id: str, document_id: str, source_job_id: str | None,
+                        expected_revision: int, rows: object, *,
+                        source_local_id: str | None = None) -> tuple[dict, bool]:
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("RECORD_VERSION_INVALID")
-        if not valid_uuid(document_id) or not valid_uuid(source_job_id):
+        if not valid_uuid(document_id) or valid_uuid(source_job_id) == valid_uuid(source_local_id):
             raise LookupError("RECORD_SOURCE_NOT_FOUND")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            source = db.execute("SELECT d.document_kind FROM documents d "
-                                "JOIN jobs j ON j.document_id=d.id "
-                                "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
-                                "AND d.document_kind IN ('purchase_order','invoice') "
-                                "AND j.id=? AND j.session_id=? AND j.scenario='real' "
-                                "AND j.state='done'",
-                                (document_id, session_id, source_job_id, session_id)).fetchone()
+            if source_local_id:
+                source = db.execute("SELECT d.document_kind FROM documents d "
+                                    "JOIN management_local_sources l ON l.document_id=d.id "
+                                    "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
+                                    "AND d.document_kind='purchase_order' AND l.id=? "
+                                    "AND l.session_id=?",
+                                    (document_id, session_id, source_local_id, session_id)).fetchone()
+            else:
+                source = db.execute("SELECT d.document_kind FROM documents d "
+                                    "JOIN jobs j ON j.document_id=d.id "
+                                    "WHERE d.id=? AND d.session_id=? AND d.purpose='management' "
+                                    "AND d.document_kind IN ('purchase_order','invoice') "
+                                    "AND j.id=? AND j.session_id=? AND j.scenario='real' "
+                                    "AND j.state='done'",
+                                    (document_id, session_id, source_job_id, session_id)).fetchone()
             if not source:
                 raise LookupError("RECORD_SOURCE_NOT_FOUND")
             kind = source["document_kind"]
@@ -574,7 +658,8 @@ class Store:
             existing = db.execute("SELECT * FROM management_record_sets "
                                   "WHERE document_id=? AND session_id=?", (document_id, session_id)).fetchone()
             if existing:
-                if existing["source_job_id"] != source_job_id or existing["kind"] != kind:
+                if (existing["source_job_id"] != source_job_id or
+                    existing["source_local_id"] != source_local_id or existing["kind"] != kind):
                     raise ValueError("RECORD_SOURCE_CONFLICT")
                 old_rows = json.loads(existing["rows_json"])
                 new_by_id = {row["id"]: row for row in checked}
@@ -646,10 +731,10 @@ class Store:
             else:
                 record_id = str(uuid.uuid4())
                 db.execute("INSERT INTO management_record_sets "
-                           "(id,session_id,document_id,source_job_id,kind,rows_json,revision,created_ms,updated_ms) "
-                           "VALUES (?,?,?,?,?,?,?,?,?)",
-                           (record_id, session_id, document_id, source_job_id, kind, rows_json, 1,
-                            timestamp, timestamp))
+                           "(id,session_id,document_id,source_job_id,source_local_id,kind,rows_json,revision,created_ms,updated_ms) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (record_id, session_id, document_id, source_job_id, source_local_id,
+                            kind, rows_json, 1, timestamp, timestamp))
                 created = True
             saved = db.execute("SELECT * FROM management_record_sets WHERE id=?", (record_id,)).fetchone()
         return self.public_record_set(saved), created
@@ -665,52 +750,112 @@ class Store:
 
 
 def run_real_job(store: Store, job_id: str, document_id: str, adapter: GeminiAdapter,
-                 slot: threading.BoundedSemaphore, document_kind: str | None = None) -> None:
+                 slot: threading.BoundedSemaphore, document_kind: str | None = None,
+                 trace_id: str | None = None) -> None:
     if not slot.acquire(blocking=False):
         store.set_job(job_id, state="failed", error_code="AI_RATE_LIMITED",
                       steps={"ai": "fail", "format": "not_run"}, finished_ms=now_ms())
+        audit_event("real_job", job_id, "db_committed", {"trace_id": trace_id})
+        audit_event("real_job", job_id, "failed",
+                    {"trace_id": trace_id, "code": "AI_RATE_LIMITED"})
         return
     try:
-        run_job(store, job_id, document_id, adapter, document_kind)
+        run_job(store, job_id, document_id, adapter, document_kind, trace_id)
     finally:
         slot.release()
 
 
+class ResultFormatError(ValueError):
+    """A fixed, content-free description of a response validation failure."""
+
+    def __init__(self, reason: str, *, item_index: int | None = None,
+                 field: str | None = None, actual_type: str | None = None,
+                 length_bucket: str | None = None):
+        super().__init__("RESULT_FORMAT_INVALID")
+        self.audit_metadata: dict[str, object] = {"format_reason": reason}
+        if item_index is not None:
+            self.audit_metadata["item_index"] = item_index
+        if field is not None:
+            self.audit_metadata["field"] = field
+        if actual_type is not None:
+            self.audit_metadata["actual_type"] = actual_type
+        if length_bucket is not None:
+            self.audit_metadata["length_bucket"] = length_bucket
+
+
+def format_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if type(value) in {int, float}:
+        return "number"
+    return "other"
+
+
+def format_length_bucket(length: int) -> str:
+    return "201_500" if length <= 500 else "501_1000" if length <= 1000 else "OVER_1000"
+
+
+def result_items(value: object) -> list:
+    if not isinstance(value, dict):
+        raise ResultFormatError("ROOT_TYPE", actual_type=format_type(value))
+    items = value.get("items")
+    if not isinstance(items, list):
+        raise ResultFormatError("ITEMS_TYPE", actual_type=format_type(items))
+    if len(items) > 100:
+        raise ResultFormatError("ITEMS_COUNT")
+    return items
+
+
 def validate_result(value: object) -> list[dict]:
-    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
-        raise ValueError("RESULT_FORMAT_INVALID")
-    rows = value["items"]
-    if len(rows) > 100:
-        raise ValueError("RESULT_FORMAT_INVALID")
-    for row in rows:
-        if (not isinstance(row, dict) or not isinstance(row.get("description"), str)
-                or len(row["description"]) > 200 or type(row.get("quantity")) is not int
-                or row["quantity"] < 0):
-            raise ValueError("RESULT_FORMAT_INVALID")
+    rows = result_items(value)
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ResultFormatError("ITEM_TYPE", item_index=index, actual_type=format_type(row))
+        description = row.get("description")
+        if not isinstance(description, str):
+            raise ResultFormatError("FIELD_TYPE", item_index=index, field="description",
+                                    actual_type=format_type(description))
+        if len(description) > 200:
+            raise ResultFormatError("FIELD_LENGTH", item_index=index, field="description",
+                                    length_bucket=format_length_bucket(len(description)))
+        quantity = row.get("quantity")
+        if type(quantity) is not int:
+            raise ResultFormatError("FIELD_TYPE", item_index=index, field="quantity",
+                                    actual_type=format_type(quantity))
+        if quantity < 0:
+            raise ResultFormatError("FIELD_RANGE", item_index=index, field="quantity")
     return [{"description": row["description"], "quantity": row["quantity"]} for row in rows]
 
 
 def validate_management_result(value: object) -> list[dict]:
-    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
-        raise ValueError("RESULT_FORMAT_INVALID")
-    items = value["items"]
-    if len(items) > 100:
-        raise ValueError("RESULT_FORMAT_INVALID")
-    fields = ("orderNo", "invoiceNo", "client", "product", "code", "qty", "unitPrice",
-              "amount", "currency", "date", "incoterms", "unit")
+    items = result_items(value)
     rows = []
-    for item in items:
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
-            raise ValueError("RESULT_FORMAT_INVALID")
+            raise ResultFormatError("ITEM_TYPE", item_index=index, actual_type=format_type(item))
         row = {}
-        for field in fields:
+        for field in MANAGEMENT_FIELDS:
             raw = item.get(field)
             if raw is None:
                 row[field] = None
-            elif isinstance(raw, str) and len(raw) <= 200 and "\x00" not in raw:
-                row[field] = raw if raw.strip() else None
+            elif not isinstance(raw, str):
+                raise ResultFormatError("FIELD_TYPE", item_index=index, field=field,
+                                        actual_type=format_type(raw))
+            elif len(raw) > 200:
+                raise ResultFormatError("FIELD_LENGTH", item_index=index, field=field,
+                                        length_bucket=format_length_bucket(len(raw)))
+            elif "\x00" in raw:
+                raise ResultFormatError("FIELD_NUL", item_index=index, field=field)
             else:
-                raise ValueError("RESULT_FORMAT_INVALID")
+                row[field] = raw if raw.strip() else None
         rows.append(row)
     return rows
 
@@ -733,40 +878,56 @@ def validate_draft_rows(value: object) -> list[dict]:
 
 
 def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
-            document_kind: str | None = None) -> None:
+            document_kind: str | None = None, trace_id: str | None = None) -> None:
     real = isinstance(adapter, GeminiAdapter)
+    trace = {"trace_id": trace_id} if trace_id else {}
     if real:
-        audit_event("real_job", job_id, "start")
+        audit_event("real_job", job_id, "start", trace)
     store.set_job(job_id, state="running", started_ms=now_ms())
     try:
+        if real:
+            audit_event("real_job", job_id, "ai_start", trace)
         raw = adapter.recognize(str(store.files / f"{document_id}.pdf"), deadline_seconds=25 if real else 5)
+        if real:
+            audit_event("real_job", job_id, "ai_response", trace)
         rows = validate_management_result(raw) if document_kind in KINDS else validate_result(raw)
+        if real:
+            audit_event("real_job", job_id, "format_pass", trace)
         store.set_job(job_id, state="done", result=rows, steps={"ai": "pass", "format": "pass"},
                       finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "done")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "done", trace)
     except AIUnknown as exc:
         metadata = safe_ai_metadata(exc)
-        store.set_job(job_id, state="unknown", error_code=safe_ai_code(exc.code, "AI_RESULT_UNKNOWN"),
+        code = safe_ai_code(exc.code, "AI_RESULT_UNKNOWN")
+        store.set_job(job_id, state="unknown", error_code=code,
                       steps={"ai": "unknown", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "unknown", metadata)
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "unknown", {**trace, "code": code, **metadata})
     except AIError as exc:
         metadata = safe_ai_metadata(exc)
-        store.set_job(job_id, state="failed", error_code=safe_ai_code(exc.code, "AI_FAILURE"),
+        code = safe_ai_code(exc.code, "AI_FAILURE")
+        store.set_job(job_id, state="failed", error_code=code,
                       steps={"ai": "fail", "format": "not_run", **metadata}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "failed", metadata)
-    except ValueError:
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "failed", {**trace, "code": code, **metadata})
+    except ResultFormatError as exc:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
                       steps={"ai": "pass", "format": "fail"}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "result_format_invalid")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "result_format_invalid",
+                        {**trace, "code": "RESULT_FORMAT_INVALID", **exc.audit_metadata})
     except Exception:
         store.set_job(job_id, state="unknown", error_code="INTERNAL_UNKNOWN",
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
         if real:
-            audit_event("real_job", job_id, "internal_unknown")
+            audit_event("real_job", job_id, "db_committed", trace)
+            audit_event("real_job", job_id, "internal_unknown",
+                        {**trace, "code": "INTERNAL_UNKNOWN"})
 
 
 class AppServer(ThreadingHTTPServer):
@@ -787,6 +948,8 @@ class AppServer(ThreadingHTTPServer):
         self.auth_hash = auth_hash
         self.login_times: deque[float] = deque()
         self.login_lock = threading.Lock()
+        self.report_times: dict[str, deque[float]] = {}
+        self.report_lock = threading.Lock()
         self.store = store
         self.store.public_limits = bool(public_origin)
         self.upload_slots = threading.BoundedSemaphore(2)
@@ -809,6 +972,22 @@ class AppServer(ThreadingHTTPServer):
             if len(self.login_times) >= LOGIN_ATTEMPTS_PER_MINUTE:
                 return False
             self.login_times.append(now)
+            return True
+
+    def allow_diagnostic_report(self, session_id: str) -> bool:
+        now = time.monotonic()
+        with self.report_lock:
+            for key, times in list(self.report_times.items()):
+                while times and times[0] <= now - 60:
+                    times.popleft()
+                if not times:
+                    del self.report_times[key]
+            if len(self.report_times) >= 64 and session_id not in self.report_times:
+                return False
+            times = self.report_times.setdefault(session_id, deque())
+            if len(times) >= 12:
+                return False
+            times.append(now)
             return True
 
     def _prune_keys(self, now: float) -> None:
@@ -869,9 +1048,62 @@ class Handler(BaseHTTPRequestHandler):
             self._request_id = supplied if valid_uuid(supplied) else str(uuid.uuid4())
         return self._request_id
 
+    def trace_id(self) -> str:
+        if not hasattr(self, "_trace_id"):
+            supplied = self.headers.get("X-Orderflow-Trace-Id")
+            self._trace_id = supplied if valid_uuid(supplied) else str(uuid.uuid4())
+        return self._trace_id
+
+    def route_label(self) -> str | None:
+        path = urlsplit(self.path).path
+        if not path.startswith(PREFIX + "api/"):
+            return None
+        tail = path[len(PREFIX + "api/"):]
+        exact = {
+            "bootstrap": "bootstrap", "management/bootstrap": "management_bootstrap",
+            "documents": "documents", "management/documents": "management_documents",
+            "jobs": "jobs", "management/jobs": "management_jobs",
+            "management/local-sources": "local_sources", "key/check": "key_check",
+            "echo": "echo", "sample": "sample", "diagnostics": "diagnostics",
+        }
+        if tail in exact:
+            return exact[tail]
+        for prefix, label in (("jobs/", "job_get"),
+                              ("management/jobs/", "management_job_get"),
+                              ("management/record-sets/", "record_sets"),
+                              ("management/drafts/", "drafts")):
+            if tail.startswith(prefix):
+                return label
+        return "other_api"
+
+    def audit_http(self, phase: str, status: int | None = None) -> None:
+        route = self.route_label()
+        if route is None:
+            return
+        if phase == "received":
+            self._audit_started = time.monotonic()
+        metadata: dict[str, object] = {
+            "route": route, "trace_id": self.trace_id(), "source": "server",
+        }
+        if status is not None:
+            metadata["http_status"] = int(status)
+        if hasattr(self, "_audit_started"):
+            metadata["duration_ms"] = min(120_000, max(0, int(
+                (time.monotonic() - self._audit_started) * 1000)))
+        audit_event("http", self.request_id(), phase, metadata)
+
+    def audit_commit(self, created: bool | None = None, job_id: str | None = None) -> None:
+        route = self.route_label()
+        if route is None:
+            return
+        audit_event("http", self.request_id(), "db_committed",
+                    {"route": route, "trace_id": self.trace_id(), "created": created,
+                     "job_id": job_id, "source": "server"})
+
     def end_headers(self) -> None:
         self.send_header("X-Orderflow-Origin", "app")
         self.send_header("X-Orderflow-Request-Id", self.request_id())
+        self.send_header("X-Orderflow-Trace-Id", self.trace_id())
         super().end_headers()
 
     def json_response(self, status: int, value: object, cookie: str | None = None,
@@ -892,9 +1124,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.audit_http("response_written", status)
+        except OSError:
             # The request may already be committed; the client can query or replay its key.
-            pass
+            self.audit_http("response_write_unknown", status)
 
     def error(self, status: int, code: str) -> None:
         self.json_response(status, {"error_code": code})
@@ -969,6 +1202,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self.valid_host():
             return
+        self.audit_http("received")
         path = urlsplit(self.path).path
         if path == "/orderflow":
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)
@@ -979,7 +1213,12 @@ class Handler(BaseHTTPRequestHandler):
         static_routes = {
             PREFIX: ("index.html", "text/html"),
             PREFIX + "manage.js": ("manage.js", "text/javascript"),
+            PREFIX + "diagnostics.js": ("diagnostics.js", "text/javascript"),
             PREFIX + "manage.css": ("manage.css", "text/css"),
+            PREFIX + "local-pdf-core.mjs": ("local-pdf-core.mjs", "text/javascript"),
+            PREFIX + "local-pdf-worker.mjs": ("local-pdf-worker.mjs", "text/javascript"),
+            PREFIX + "vendor/pdfjs/pdf.min.mjs": ("vendor/pdfjs/pdf.min.mjs", "text/javascript"),
+            PREFIX + "vendor/pdfjs/pdf.worker.min.mjs": ("vendor/pdfjs/pdf.worker.min.mjs", "text/javascript"),
             PREFIX + "test/": ("test.html", "text/html"),
             PREFIX + "app.js": ("app.js", "text/javascript"),
             PREFIX + "style.css": ("style.css", "text/css"),
@@ -998,14 +1237,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(data)
             return
         if path == PREFIX + "api/health":
             if not self.get_session():
                 return
-            self.json_response(200, {"status": "ok", "version": VERSION, "mode": "mock-and-real"})
+            self.json_response(200, {"status": "ok", "version": VERSION,
+                                     "build_id": BUILD_ID, "mode": "mock-and-real"})
             return
         if path == PREFIX + "api/bootstrap":
             session_id = self.get_session()
@@ -1027,6 +1267,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "jobs": self.server.store.jobs(session_id, "management"),
                                      "drafts": self.server.store.management_drafts(session_id),
                                      "record_sets": self.server.store.record_sets(session_id),
+                                     "local_sources": self.server.store.local_sources(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
                                      "ai_model": GEMINI_MODEL,
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
@@ -1052,6 +1293,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(404, "JOB_NOT_FOUND")
                 return
             job = self.server.store.job(session_id, job_id)
+            if job:
+                audit_event("http", self.request_id(), "job_fetched",
+                            {"route": "job_get", "job_id": job_id,
+                             "trace_id": self.trace_id(), "source": "server"})
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/management/jobs/"):
@@ -1063,6 +1308,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(404, "JOB_NOT_FOUND")
                 return
             job = self.server.store.job(session_id, job_id, "management")
+            if job:
+                audit_event("http", self.request_id(), "job_fetched",
+                            {"route": "management_job_get", "job_id": job_id,
+                             "trace_id": self.trace_id(), "source": "server"})
             self.json_response(200, job) if job else self.error(404, "JOB_NOT_FOUND")
             return
         if path.startswith(PREFIX + "api/management/record-sets/"):
@@ -1119,6 +1368,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self.valid_host() or not self.valid_origin():
             return
+        self.audit_http("received")
         path = urlsplit(self.path).path
         # A custom header blocks ordinary cross-site forms; no CORS headers are served.
         if self.headers.get("X-Orderflow-Request") != "1":
@@ -1132,6 +1382,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         session_id = self.get_session()
         if not session_id:
+            return
+        if path == PREFIX + "api/diagnostics":
+            value = self.get_json(4096)
+            if value is None:
+                return
+            events = client_report(value)
+            if events is None:
+                self.error(400, "DIAGNOSTIC_INVALID")
+                return
+            if not self.server.allow_diagnostic_report(session_id):
+                self.error(429, "DIAGNOSTIC_RATE_LIMITED")
+                return
+            for item in events:
+                audit_event("client_observation", self.request_id(),
+                            item["phase"], {**item, "source": "client"})
+            self.json_response(200, {"status": "recorded"})
             return
         if path == PREFIX + "api/key":
             value = self.get_json()
@@ -1153,20 +1419,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(409, "KEY_REQUIRED")
                 return
             request_id = self.request_id()
-            audit_event("key_check", request_id, "start")
+            audit_event("key_check", request_id, "start", {"trace_id": self.trace_id()})
             try:
                 GeminiAdapter(key).check_text()
             except (AIError, AIUnknown) as exc:
                 metadata = safe_ai_metadata(exc)
-                audit_event("key_check", request_id, "failed", {"app_http_status": 502, **metadata})
+                audit_event("key_check", request_id, "failed",
+                            {"trace_id": self.trace_id(), "app_http_status": 502, **metadata})
                 self.json_response(502, {"error_code": safe_ai_code(exc.code, "AI_HTTP_UNKNOWN"),
                                          **metadata})
                 return
             except Exception:
-                audit_event("key_check", request_id, "internal_unknown", {"app_http_status": 502})
+                audit_event("key_check", request_id, "internal_unknown",
+                            {"trace_id": self.trace_id(), "app_http_status": 502})
                 self.error(502, "AI_HTTP_UNKNOWN")
                 return
-            audit_event("key_check", request_id, "done", {"app_http_status": 200})
+            audit_event("key_check", request_id, "done",
+                        {"trace_id": self.trace_id(), "app_http_status": 200})
             self.json_response(200, {"status": "ok", "model": GEMINI_MODEL})
             return
         if path == PREFIX + "api/echo":
@@ -1178,6 +1447,30 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(400, "BAD_NONCE")
                 return
             self.json_response(200, {"nonce": nonce})
+            return
+        if path == PREFIX + "api/management/local-sources":
+            value = self.get_json(MAX_RECORD_JSON_BYTES)
+            if value is None:
+                return
+            if set(value) != {"document_id", "request_key", "parser_id", "candidate_rows"}:
+                self.error(400, "LOCAL_SOURCE_INVALID")
+                return
+            try:
+                source, created = self.server.store.add_local_source(
+                    session_id, value["document_id"], value["request_key"],
+                    value["parser_id"], value["candidate_rows"])
+            except LookupError:
+                self.error(404, "LOCAL_DOCUMENT_NOT_FOUND")
+                return
+            except RecordRowsError as exc:
+                self.json_response(400, {"error_code": "RECORD_ROWS_INVALID", "errors": exc.errors})
+                return
+            except ValueError as exc:
+                code = str(exc)
+                self.error(409 if code == "LOCAL_SOURCE_CONFLICT" else 400, code)
+                return
+            self.audit_commit(created)
+            self.json_response(201 if created else 200, source)
             return
         if path in {PREFIX + "api/documents", PREFIX + "api/management/documents"}:
             purpose = "management" if path == PREFIX + "api/management/documents" else "diagnostic"
@@ -1207,6 +1500,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(429 if code == "JOB_LIMIT" else 409,
                            "JOB_LIMIT" if code == "JOB_LIMIT" else "IDEMPOTENCY_CONFLICT")
                 return
+            self.audit_commit(created, job["id"])
             if created:
                 document = self.server.store.document_info(session_id, document_id, purpose)
                 document_kind = document["document_kind"] if purpose == "management" else None
@@ -1215,9 +1509,9 @@ class Handler(BaseHTTPRequestHandler):
                 target = run_real_job if scenario == "real" else run_job
                 arguments = (self.server.store, job["id"], document_id, adapter)
                 if scenario == "real":
-                    arguments += (self.server.real_job_slot, document_kind)
+                    arguments += (self.server.real_job_slot, document_kind, self.trace_id())
                 else:
-                    arguments += (document_kind,)
+                    arguments += (document_kind, self.trace_id())
                 threading.Thread(target=target, args=arguments, daemon=True).start()
             self.json_response(202 if created else 200, job)
             return
@@ -1226,6 +1520,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         if not self.valid_host() or not self.valid_origin():
             return
+        self.audit_http("received")
         if self.headers.get("X-Orderflow-Request") != "1":
             self.error(403, "REQUEST_HEADER_REQUIRED")
             return
@@ -1248,6 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         if not self.valid_host():
             return
+        self.audit_http("received")
         session_id = self.get_session()
         if not session_id or not self.valid_origin():
             return
@@ -1263,13 +1559,15 @@ class Handler(BaseHTTPRequestHandler):
             value = self.get_json(MAX_RECORD_JSON_BYTES)
             if value is None:
                 return
-            if set(value) != {"source_job_id", "revision", "rows"}:
+            if set(value) not in ({"source_job_id", "revision", "rows"},
+                                  {"source_local_id", "revision", "rows"}):
                 self.error(400, "RECORD_ROWS_INVALID")
                 return
             try:
                 record, created = self.server.store.save_record_set(
-                    session_id, document_id, value["source_job_id"],
-                    value["revision"], value["rows"])
+                    session_id, document_id, value.get("source_job_id"),
+                    value["revision"], value["rows"],
+                    source_local_id=value.get("source_local_id"))
             except LookupError:
                 self.error(404, "RECORD_SOURCE_NOT_FOUND")
                 return
@@ -1285,6 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.error(409 if code in conflicts else 400,
                            code if code in allowed else "RECORD_ROWS_INVALID")
                 return
+            self.audit_commit(created)
             self.json_response(201 if created else 200, record)
             return
         if not path.startswith(PREFIX + "api/management/drafts/"):
@@ -1312,6 +1611,7 @@ class Handler(BaseHTTPRequestHandler):
                        code if code in {"DRAFT_VERSION_CONFLICT", "DRAFT_VERSION_INVALID",
                                         "DRAFT_ROWS_INVALID"} else "DRAFT_ROWS_INVALID")
             return
+        self.audit_commit(created)
         self.json_response(201 if created else 200, draft)
 
     do_PATCH = _unsupported_api_method
@@ -1388,6 +1688,7 @@ class Handler(BaseHTTPRequestHandler):
             self.error(507 if code == "STORAGE_LIMIT" else 409,
                        "STORAGE_LIMIT" if code == "STORAGE_LIMIT" else "IDEMPOTENCY_CONFLICT")
             return
+        self.audit_commit(not doc["duplicate"] if "duplicate" in doc else None)
         self.json_response(201, doc)
 
 

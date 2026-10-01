@@ -1,7 +1,8 @@
 "use strict";
 const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
-const state = {documents: [], jobs: [], drafts: [], recordSets: [], key: false, selected: null,
+const state = {documents: [], jobs: [], drafts: [], recordSets: [], localSources: [],
+  localSource: null, localPreview: null, parseTask: null, key: false, selected: null,
   job: null, rows: [], recordIssues: [], revision: 0, editSerial: 0,
   dirty: false, busy: false, uploadKey: null,
   uploadFile: null, pendingFile: null, pendingKind: null, pendingRecordEdit: null,
@@ -35,6 +36,10 @@ function keyInputError(value) {
   return null;
 }
 const uuid = () => crypto.randomUUID();
+const diagnostics = window.OrderflowDiagnostics?.create(apiBase) || {
+  record() {}, flush() {}, summary() { return "瀏覽器事件記錄未載入。"; },
+  newOperation() { return uuid(); }, get traceId() { return ""; }
+};
 function status(id, message, kind = "") { el(id).textContent = message; el(id).dataset.state = kind; }
 function safeError(error) {
   const parts = [error.code || "NETWORK_ERROR"];
@@ -48,24 +53,41 @@ function safeError(error) {
 }
 async function api(path, options = {}, timeoutMs = 10000) {
   const requestId = uuid();
+  const started = Date.now();
+  let appReached = false;
+  let canReport = false;
+  diagnostics.record("send", path, {requestId});
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(apiBase + path, { ...options, signal: controller.signal,
       credentials: "same-origin", cache: "no-store",
-      headers: {...options.headers, "X-Orderflow-Request": "1", "X-Orderflow-Request-Id": requestId} });
+      headers: {...options.headers, "X-Orderflow-Request": "1",
+        "X-Orderflow-Request-Id": requestId, "X-Orderflow-Trace-Id": diagnostics.traceId} });
     const appMarker = response.headers.get("X-Orderflow-Origin") === "app" ? "APP" : "MISSING";
+    appReached = appMarker === "APP";
+    canReport = appReached && response.status !== 401 && path !== "logout";
     const type = (response.headers.get("Content-Type") || "").split(";", 1)[0].toLowerCase();
+    const responseType = type === "application/json" ? "JSON" :
+      type === "text/html" ? "HTML" : type === "text/plain" ? "TEXT" : type ? "OTHER" : "MISSING";
+    diagnostics.record("http_received", path, {requestId, httpStatus: response.status,
+      responseType, durationMs: Date.now() - started});
+    diagnostics.record("marker_checked", path, {requestId, marker: appMarker});
+    if (appReached && response.headers.get("X-Orderflow-Request-Id") !== requestId)
+      throw {code: "REQUEST_ID_MISMATCH", status: response.status, appMarker,
+        responseType, requestId, unknown: true};
     let data;
     try { data = await response.json(); }
     catch { throw {code: "BAD_JSON_RESPONSE", status: response.status, appMarker,
-      responseType: type === "text/html" ? "HTML" : type || "MISSING", requestId}; }
+      responseType, requestId}; }
+    diagnostics.record("json_parsed", path, {requestId, httpStatus: response.status});
     if (!response.ok) {
       if (response.status === 401 && path !== "login") {
         const recordSave = path.startsWith("management/record-sets/");
-        if (recordSave) state.pendingRecordEdit = {documentId: state.selected, jobId: state.job?.id,
+        if (recordSave && !state.localPreview) state.pendingRecordEdit = {
+          documentId: state.selected, jobId: state.job?.id, localSourceId: state.localSource?.id,
           revision: state.revision, rows: state.rows.map(row => ({...row}))};
-        const preserve = recordSave || !!state.pendingRecordEdit;
+        const preserve = recordSave || !!state.pendingRecordEdit || !!state.localPreview;
         showLogin(preserve ? "登入已過期；未存品項暫留在此頁。請重新登入後核對再保存。"
           : "登入已過期，請重新登入。", preserve);
       }
@@ -78,10 +100,29 @@ async function api(path, options = {}, timeoutMs = 10000) {
     }
     return data;
   } catch (error) {
-    if (error?.name === "AbortError") throw {code: "REQUEST_TIMEOUT", requestId, unknown: true};
-    if (error?.code) throw error;
-    throw {code: "NETWORK_ERROR", requestId, unknown: true};
-  } finally { clearTimeout(timer); }
+    const failure = error?.name === "AbortError"
+      ? {code: "REQUEST_TIMEOUT", requestId, unknown: true}
+      : error?.code ? error : {code: "NETWORK_ERROR", requestId, unknown: true};
+    diagnostics.record(failure.code === "BAD_JSON_RESPONSE" ? "json_failed" : "request_unknown",
+      path, {requestId, code: failure.code, durationMs: Date.now() - started});
+    throw failure;
+  } finally { clearTimeout(timer); void diagnostics.flush(canReport); }
+}
+async function copyDiagnosticReport() {
+  const field = el("diagnostic-report");
+  const failedJob = state.job?.state === "failed" || state.job?.state === "unknown"
+    ? `\n\n${jobErrorSummary(state.job)}` : "";
+  field.value = diagnostics.summary() + failedJob;
+  try {
+    if (!navigator.clipboard?.writeText) throw Error("unavailable");
+    await navigator.clipboard.writeText(field.value);
+    status("diagnostic-copy-status", "已複製診斷資訊。", "good");
+  } catch {
+    const details = field.closest?.("details");
+    if (details) details.open = true;
+    field.focus(); field.select();
+    status("diagnostic-copy-status", "無法自動複製；已選取內容，請按 Ctrl/Cmd+C。", "unknown");
+  }
 }
 function showLogin(message = "請輸入網站密碼。", preserveEditor = false) {
   keyWorkspaceShown = false;
@@ -89,6 +130,7 @@ function showLogin(message = "請輸入網站密碼。", preserveEditor = false)
   el("logout").hidden = true; el("password").value = ""; clearKeyInput();
   if (!preserveEditor) {
     state.documents = []; state.jobs = []; state.drafts = []; state.recordSets = [];
+    state.localSources = []; state.localSource = null; state.localPreview = null;
     state.selected = null; state.job = null; state.rows = []; state.pendingRecordEdit = null;
   }
   state.pendingFile = null; state.pendingKind = null; state.key = false;
@@ -100,9 +142,11 @@ function showLogin(message = "請輸入網站密碼。", preserveEditor = false)
 function showWorkspace(data) {
   state.documents = data.documents || []; state.jobs = data.jobs || [];
   state.drafts = data.drafts || []; state.recordSets = data.record_sets || [];
+  state.localSources = data.local_sources || [];
   const pending = state.pendingRecordEdit;
   const canRestore = pending && state.documents.some(doc => doc.id === pending.documentId) &&
-    state.jobs.some(job => job.id === pending.jobId && job.document_id === pending.documentId && job.state === "done");
+    (state.jobs.some(job => job.id === pending.jobId && job.document_id === pending.documentId && job.state === "done") ||
+      state.localSources.some(source => source.id === pending.localSourceId && source.document_id === pending.documentId));
   if (canRestore) { state.selected = pending.documentId; state.job = null; }
   state.key = !!data.ai_key_configured;
   if (!keyWorkspaceShown) {
@@ -117,16 +161,15 @@ function showWorkspace(data) {
     ? "金鑰已暫存，欄位不回填。輸入形式不代表有效；可至診斷測試頁明確執行文字連線檢查。"
     : "尚未設定金鑰。", state.key ? "good" : "");
   if (state.selected && !state.documents.some(doc => doc.id === state.selected)) state.selected = null;
-  if (!state.selected && state.documents.length) state.selected = state.documents[0].id;
+  if (state.localPreview) state.selected = null;
+  if (!state.selected && !state.localPreview && state.documents.length) state.selected = state.documents[0].id;
   renderDocuments();
-  if (canRestore) selectJob(pending.jobId);
+  if (state.localPreview) activateLocalPreview(true);
+  else if (canRestore && pending.localSourceId) selectLocalSource(pending.localSourceId);
+  else if (canRestore) selectJob(pending.jobId);
+  else if (state.localSource) selectLocalSource(state.localSource.id);
   else if (state.job) selectJob(state.job.id);
-  else {
-    const saved = state.recordSets.find(item => item.document_id === state.selected);
-    const latest = state.jobs.find(job => job.id === saved?.source_job_id)
-      || state.jobs.find(job => job.document_id === state.selected);
-    if (latest) selectJob(latest.id); else clearDraft();
-  }
+  else selectSelectedSource();
   if (canRestore) {
     state.rows = pending.rows.map(row => ({...row})); state.revision = pending.revision;
     state.dirty = true; state.pendingRecordEdit = null; editRecordRows();
@@ -144,8 +187,8 @@ async function load() {
   try { showWorkspace(await api("management/bootstrap")); }
   catch (error) {
     if (error.status === 401) {
-      showLogin(state.pendingRecordEdit ? "登入仍未完成；未存品項暫留在此頁。" : "請輸入網站密碼。",
-        !!state.pendingRecordEdit);
+      const preserve = !!(state.pendingRecordEdit || state.localPreview);
+      showLogin(preserve ? "登入仍未完成；未存品項暫留在此頁。" : "請輸入網站密碼。", preserve);
       return;
     }
     status("startup-status", `載入失敗：${safeError(error)}。可重新載入。`, "error");
@@ -153,10 +196,14 @@ async function load() {
   }
 }
 function refreshControls() {
-  el("recognize").disabled = !state.selected || !state.key || state.busy;
+  const editable = (state.job?.state === "done") || !!state.localSource || !!state.localPreview;
+  el("recognize").disabled = !state.selected || !state.key || state.busy ||
+    !!state.recordSets.find(set => set.document_id === state.selected && set.source_local_id);
   el("upload").disabled = !(state.pendingFile || el("pdf").files?.length) || state.busy;
-  el("add-row").disabled = !state.job || state.job.state !== "done" || state.busy;
-  el("save-draft").disabled = !state.job || state.job.state !== "done" || !state.rows.length || !state.dirty || state.busy;
+  el("local-parse").disabled = !el("local-pdf").files?.length || state.busy;
+  el("local-cancel").disabled = !state.parseTask;
+  el("add-row").disabled = !editable || state.busy;
+  el("save-draft").disabled = !editable || !state.rows.length || !state.dirty || state.busy;
   el("clear-key").disabled = !state.key || state.busy;
 }
 function renderDocuments() {
@@ -168,15 +215,15 @@ function renderDocuments() {
     const label = doc.document_kind === "purchase_order" ? "採購單" : doc.document_kind === "invoice" ? "發票" : "未分類舊草稿";
     button.textContent = `${label} ${state.documents.length - index} · ${doc.page_count || "?"} 頁 · ${Math.ceil(doc.size / 1024)} KB · ${new Date(doc.created_ms).toLocaleString()}`;
     button.addEventListener("click", () => { if (state.busy) return;
+      if (state.localPreview && !window.confirm("本機解析預覽尚未儲存。要放棄編修並選取其他文件嗎？")) return;
       state.selected = doc.id; state.job = null; renderDocuments(); renderJobs();
-      const saved = state.recordSets.find(item => item.document_id === doc.id);
-      const latest = state.jobs.find(job => job.id === saved?.source_job_id)
-        || state.jobs.find(job => job.document_id === doc.id);
-      if (latest) selectJob(latest.id); else clearDraft(); refreshControls(); });
+      state.localPreview = null; el("local-hints").hidden = true;
+      selectSelectedSource(); refreshControls(); });
     target.append(button);
   });
   const selected = state.documents.find(doc => doc.id === state.selected);
-  el("selection").textContent = selected ? `已選文件：${selected.page_count || "?"} 頁、${selected.size} bytes。` : "請先上傳或選取文件。";
+  el("selection").textContent = selected ? `已選文件：${selected.page_count || "?"} 頁、${selected.size} bytes。`
+    : state.localPreview ? "本機解析預覽：尚未上傳 PDF。" : "請先上傳或選取文件。";
   renderJobs();
 }
 function renderJobs() {
@@ -192,11 +239,11 @@ function renderJobs() {
   });
 }
 function clearDraft() {
-  state.job = null; state.rows = []; state.revision = 0; state.dirty = false;
+  state.job = null; state.localSource = null; state.rows = []; state.revision = 0; state.dirty = false;
   el("rows").replaceChildren(); status("job-status", "尚未啟動。");
   clearJobErrorTools();
-  el("draft-source").textContent = "完成真正辨識後，才會在這裡顯示可編修的品項。";
-  status("draft-status", "尚無管理草稿。未儲存的編修在重新整理後會消失。");
+  el("draft-source").textContent = "讀取 PDF 或完成辨識後，這裡會顯示可核對的品項。";
+  status("draft-status", "尚未儲存。未儲存的修改在重新整理後會消失。");
   renderJobs(); refreshControls();
 }
 function editRows(rows) {
@@ -229,8 +276,12 @@ function utcTime(value) {
 function jobErrorSummary(job) {
   const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const id = typeof job.id === "string" && validUuid.test(job.id) ? job.id : "unknown";
-  const code = typeof job.error_code === "string" && /^[A-Z0-9_]{2,40}$/.test(job.error_code)
-    ? job.error_code : "UNKNOWN";
+  const safeCodes = new Set(["AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED",
+    "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED",
+    "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "AI_RESULT_UNKNOWN",
+    "AI_FAILURE",
+    "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN"]);
+  const code = safeCodes.has(job.error_code) ? job.error_code : "UNKNOWN";
   const created = utcTime(job.created_ms);
   const started = utcTime(job.started_ms);
   const finished = utcTime(job.finished_ms);
@@ -243,11 +294,14 @@ function jobErrorSummary(job) {
     ? String(steps.upstream_http_status) : "unknown";
   const upstreamReason = ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"]
     .includes(steps.upstream_reason) ? steps.upstream_reason : "unknown";
+  const transportClass = ["DNS", "TLS", "CONNECT_REFUSED", "TIMEOUT_UNKNOWN",
+    "IO_UNKNOWN", "HTTP_TRUNCATED", "HTTP_MALFORMED"].includes(steps.transport_class)
+    ? steps.transport_class : "unknown";
   return ["OrderFlow 辨識錯誤資訊", `job_id: ${id}`,
     `state: ${job.state === "failed" ? "failed" : "unknown"}`, `error_code: ${code}`,
     `created_utc: ${created}`, `started_utc: ${started}`, `finished_utc: ${finished}`,
     `elapsed_ms: ${elapsed}`, `upstream_http_status: ${upstreamStatus}`,
-    `upstream_reason: ${upstreamReason}`].join("\n");
+    `upstream_reason: ${upstreamReason}`, `transport_class: ${transportClass}`].join("\n");
 }
 function clearJobErrorTools() {
   el("job-error-tools").hidden = true;
@@ -280,25 +334,41 @@ async function copyJobError() {
 function selectJob(id) {
   const job = state.jobs.find(item => item.id === id && item.document_id === state.selected);
   if (!job) { clearDraft(); return; }
-  state.job = job; renderJobs(); renderJobErrorTools(job);
-  if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
-    clearDraftEditor(); pollJob(id); return; }
-  if (job.state !== "done") { status("job-status", `辨識${job.state === "unknown" ? "結果不明" : "失敗"}：${job.error_code || "UNKNOWN"}${job.steps?.upstream_http_status ? ` · Google HTTP ${job.steps.upstream_http_status}` : ""}${job.steps?.upstream_reason ? ` · ${job.steps.upstream_reason}` : ""}。請求可能已送達 Google 並計費；請勿連續按辨識。系統不會自動重試。`, job.state === "unknown" ? "unknown" : "error");
-    clearDraftEditor(); return; }
-  status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
-  const selectedDoc = state.documents.find(doc => doc.id === state.selected);
-  if (selectedDoc?.document_kind === "purchase_order" || selectedDoc?.document_kind === "invoice") {
-    selectTypedJob(job, selectedDoc.document_kind);
-    return;
+  try {
+    state.job = job; state.localSource = null; state.localPreview = null;
+    renderJobs(); renderJobErrorTools(job);
+    if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
+      clearDraftEditor(); pollJob(id); return; }
+    if (job.state !== "done") { status("job-status",
+      job.state === "unknown"
+        ? "辨識結果不明。請求可能已送達 Google 並計費；請勿連續按辨識。稍後重新載入，若仍不清楚請複製下方資訊。"
+        : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。",
+      job.state === "unknown" ? "unknown" : "error");
+      clearDraftEditor(); return; }
+    status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
+    const selectedDoc = state.documents.find(doc => doc.id === state.selected);
+    if (selectedDoc?.document_kind === "purchase_order" || selectedDoc?.document_kind === "invoice") {
+      selectTypedJob(job, selectedDoc.document_kind);
+      diagnostics.record("job_rendered", `management/jobs/${id}`);
+      void diagnostics.flush(true);
+      return;
+    }
+    el("save-draft").textContent = "儲存草稿";
+    const saved = state.drafts.find(draft => draft.source_job_id === id);
+    state.revision = saved?.revision || 0; state.dirty = !saved;
+    el("draft-source").textContent = `來源辨識 ${id}；${saved ? `已儲存修訂 ${saved.revision}` : "尚未儲存"}。`;
+    const rows = saved?.rows || job.result || [];
+    editRows(rows.length ? rows : [{description: "", quantity: 0}]);
+    status("draft-status", saved ? `已儲存修訂 ${saved.revision}。` : "請核對後按「儲存草稿」。未儲存的編修會消失。", saved ? "good" : "");
+    refreshControls();
+    diagnostics.record("job_rendered", `management/jobs/${id}`);
+    void diagnostics.flush(true);
+  } catch {
+    diagnostics.record("render_failed", `management/jobs/${id}`, {code: "RENDER_FAILED"});
+    void diagnostics.flush(true);
+    el("save-draft").disabled = true;
+    status("job-status", "辨識結果無法顯示。請複製診斷資訊並聯絡提供網站的人。", "error");
   }
-  el("save-draft").textContent = "儲存草稿";
-  const saved = state.drafts.find(draft => draft.source_job_id === id);
-  state.revision = saved?.revision || 0; state.dirty = !saved;
-  el("draft-source").textContent = `來源辨識 ${id}；${saved ? `已儲存修訂 ${saved.revision}` : "尚未儲存"}。`;
-  const rows = saved?.rows || job.result || [];
-  editRows(rows.length ? rows : [{description: "", quantity: 0}]);
-  status("draft-status", saved ? `已儲存修訂 ${saved.revision}。` : "請核對後按「儲存草稿」。未儲存的編修會消失。", saved ? "good" : "");
-  refreshControls();
 }
 function clearDraftEditor() {
   resetRecordIssues();
@@ -327,6 +397,151 @@ async function login(event) {
   catch (error) { status("login-status", `登入失敗：${safeError(error)}`, "error"); }
   finally { el("login-button").disabled = false; }
 }
+const localErrorMessages = {
+  LOCAL_FILE_SIZE: "PDF 須大於 0 且不超過 8 MB。",
+  LOCAL_PAGE_COUNT_UNSUPPORTED: "目前只支援單頁採購憑單。",
+  LOCAL_PAGE_SIZE_UNSUPPORTED: "頁面尺寸與支援版型不符。",
+  LOCAL_TEXT_UNAVAILABLE: "找不到可用文字層；目前不支援掃描圖或 OCR。",
+  LOCAL_TEMPLATE_UNSUPPORTED: "此 PDF 不是目前支援的科雅採購憑單版型。",
+  LOCAL_LAYOUT_UNSUPPORTED: "欄位位置或格式與支援版型不同，請人工檢查。",
+  LOCAL_ROWS_UNSUPPORTED: "品項列不完整或有重複，請人工檢查。",
+  LOCAL_NUMBER_UNSUPPORTED: "數字格式不受支援，請人工檢查。",
+  LOCAL_DATE_UNSUPPORTED: "日期格式或日期值不受支援，請人工檢查。",
+  LOCAL_ROW_TOTAL_MISMATCH: "品項數量、單價與金額不一致，未產生候選。",
+  LOCAL_DOCUMENT_TOTAL_MISMATCH: "表尾合計與品項不一致，未產生候選。",
+  LOCAL_PDF_UNREADABLE: "PDF 無法在瀏覽器讀取，請檢查檔案。",
+  LOCAL_TIMEOUT: "本機解析逾時，已停止處理。",
+  LOCAL_CANCELLED: "已取消本機解析。",
+};
+function selectSelectedSource() {
+  const saved = state.recordSets.find(item => item.document_id === state.selected);
+  const local = state.localSources.find(item => item.document_id === state.selected);
+  if (saved?.source_local_id && local) { selectLocalSource(local.id); return; }
+  if (!saved && local) { selectLocalSource(local.id); return; }
+  const job = state.jobs.find(item => item.id === saved?.source_job_id)
+    || state.jobs.find(item => item.document_id === state.selected);
+  if (job) selectJob(job.id);
+  else clearDraft();
+}
+function selectLocalSource(id) {
+  const source = state.localSources.find(item => item.id === id && item.document_id === state.selected);
+  if (!source) { clearDraft(); return; }
+  const saved = state.recordSets.find(item => item.document_id === state.selected && item.source_local_id === id);
+  state.localPreview = null; state.localSource = source; state.job = null;
+  state.rows = (saved?.rows || source.candidate_rows).map(row => ({...row}));
+  state.revision = saved?.revision || 0; state.dirty = !saved;
+  clearJobErrorTools(); renderJobs();
+  el("draft-source").textContent = `本機解析 ${source.parser_id} · 來源 ${id}；${saved ? `已儲存修訂 ${saved.revision}` : "尚未確認保存"}。`;
+  el("save-draft").textContent = saved ? "儲存修訂" : "確認並儲存記錄";
+  editRecordRows();
+  status("draft-status", saved ? `已儲存修訂 ${saved.revision}。`
+    : "請逐欄核對本機解析候選後保存；PDF 已存於網站主機。", saved ? "good" : "unknown");
+  refreshControls();
+}
+function activateLocalPreview(preserveRows = false) {
+  const preview = state.localPreview;
+  if (!preview) return;
+  state.selected = null; state.job = null; state.localSource = null;
+  if (!preserveRows) state.rows = preview.candidateRows.map(row => ({...row}));
+  state.revision = 0; state.dirty = true;
+  clearJobErrorTools(); renderDocuments();
+  const hints = preview.hints;
+  el("local-hints").hidden = false;
+  el("local-hints").textContent = `來源提示：廠商 ${hints.supplier}；備註 ${hints.remark || "無"}；預進貨日 ${hints.expectedArrivals.join("、")}；數量合計 ${hints.quantityTotal}（${hints.missingUnits} 筆單位空白）；金額合計 ${hints.documentTotal}。備註及預進貨日不會被當作訂單日期或貿易條件。`;
+  el("draft-source").textContent = `已讀到 ${preview.candidateRows.length} 筆；請核對，尚未儲存。`;
+  el("save-draft").textContent = "確認並儲存記錄";
+  editRecordRows();
+  status("draft-status", "請核對每欄，尤其空白單位；確認後 PDF 與人工記錄才會送到網站主機保存。", "unknown");
+  showPage("upload");
+}
+function cancelLocalParse() { state.parseTask?.cancel(); }
+async function parseLocal() {
+  const file = el("local-pdf").files?.[0];
+  if (!file || state.busy) return;
+  if (!file.name.toLowerCase().endsWith(".pdf") || file.size < 1 || file.size > 8 * 1024 * 1024) {
+    status("local-status", localErrorMessages.LOCAL_FILE_SIZE, "error"); return;
+  }
+  if (state.localPreview?.file === file) {
+    status("local-status", "這份 PDF 已有本機預覽；請繼續核對欄位。", "unknown"); return;
+  }
+  if (state.localPreview && !window.confirm("目前本機預覽尚未儲存。要放棄編修並解析另一份 PDF 嗎？")) return;
+  if (state.localPreview) { state.localPreview = null; clearDraft(); el("local-hints").hidden = true; renderDocuments(); }
+  const task = {cancelled: false, cancel() { this.cancelled = true; this.reject?.({code: "LOCAL_CANCELLED"}); }};
+  state.parseTask = task; state.busy = true; refreshControls();
+  status("local-status", "正在此瀏覽器解析文字層；PDF 尚未上傳…");
+  try {
+    const bytes = await file.arrayBuffer();
+    if (task.cancelled) throw {code: "LOCAL_CANCELLED"};
+    const worker = new Worker("/orderflow/local-pdf-worker.mjs", {type: "module"});
+    task.worker = worker;
+    const result = await new Promise((resolve, reject) => {
+      task.reject = reject;
+      const timer = setTimeout(() => reject({code: "LOCAL_TIMEOUT"}), 15000);
+      worker.onmessage = event => {
+        if (typeof event.data?.ok !== "boolean") return;
+        if (event.data.ok) resolve(event.data.result);
+        else reject({code: event.data.code || "LOCAL_PDF_UNREADABLE"});
+      };
+      worker.onerror = () => reject({code: "LOCAL_PDF_UNREADABLE"});
+      task.cleanup = () => clearTimeout(timer);
+      worker.postMessage({bytes}, [bytes]);
+    });
+    if (task.cancelled) throw {code: "LOCAL_CANCELLED"};
+    state.localPreview = {file, parserId: result.parserId, kind: result.kind,
+      candidateRows: result.rows.map(row => makeRecordRow(row, result.kind)), hints: result.hints,
+      uploadKey: uuid(), sourceKey: uuid()};
+    activateLocalPreview();
+    status("local-status", `已讀到 ${result.rows.length} 筆。請核對後儲存；目前尚未儲存。`, "good");
+  } catch (error) {
+    status("local-status", localErrorMessages[error?.code] || localErrorMessages.LOCAL_PDF_UNREADABLE,
+      error?.code === "LOCAL_CANCELLED" ? "unknown" : "error");
+  } finally {
+    task.cleanup?.(); task.worker?.terminate();
+    state.parseTask = null; state.busy = false; refreshControls();
+  }
+}
+async function saveLocalPreview(rows) {
+  const preview = state.localPreview;
+  if (!preview || state.busy) return;
+  const serial = state.editSerial;
+  diagnostics.newOperation();
+  state.busy = true; refreshControls();
+  status("draft-status", "正在上傳 PDF 並保存人工確認記錄…");
+  try {
+    const bytes = await preview.file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const sha = Array.from(new Uint8Array(digest), part => part.toString(16).padStart(2, "0")).join("");
+    const doc = await api("management/documents", {method: "POST", body: bytes,
+      headers: {"Content-Type": "application/pdf", "X-File-Size": String(bytes.byteLength),
+        "X-File-SHA256": sha, "X-Request-Key": preview.uploadKey,
+        "X-Document-Kind": "purchase_order"}}, 30000);
+    preview.documentId = doc.id;
+    const source = await api("management/local-sources", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({document_id: doc.id,
+        request_key: preview.sourceKey, parser_id: preview.parserId,
+        candidate_rows: preview.candidateRows})});
+    const current = state.recordSets.find(set => set.document_id === doc.id);
+    const record = await api(`management/record-sets/${doc.id}`, {method: "PUT",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({source_local_id: source.id,
+        revision: current?.revision || 0, rows})});
+    state.documents = [doc, ...state.documents.filter(item => item.id !== doc.id)];
+    state.localSources = [source, ...state.localSources.filter(item => item.id !== source.id)];
+    state.recordSets = [record, ...state.recordSets.filter(item => item.document_id !== doc.id)];
+    state.localPreview = null; state.localSource = source; state.selected = doc.id;
+    state.revision = record.revision;
+    if (state.editSerial === serial) { state.rows = record.rows.map(row => ({...row})); state.dirty = false; }
+    else state.dirty = true;
+    renderDocuments(); editRecordRows(); renderManagementViews();
+    status("draft-status", state.dirty ? "送出時的版本已保存；後續編修仍在欄位中，請再次核對保存。"
+      : `PDF 與人工確認記錄已存於網站主機，修訂 ${record.revision}；未送 Google。`, state.dirty ? "unknown" : "good");
+    if (!state.dirty) showPage("orders");
+  } catch (error) {
+    const issues = error.code === "RECORD_ROWS_INVALID" ? recordIssuesFromApi(error.errors) : [];
+    if (issues.length) { state.recordIssues = issues; renderRecordIssues(issues, true); }
+    status("draft-status", `保存未確認：${recordError(error)}；本機編修仍保留。請核對文件列表後再決定是否重試。`, "unknown");
+  } finally { state.busy = false; refreshControls(); }
+}
+
 async function upload() {
   const file = state.pendingFile || el("pdf").files?.[0]; if (!file || state.busy) return;
   const documentKind = state.pendingKind;
@@ -383,6 +598,7 @@ async function clearKey() {
 async function recognize() {
   if (!state.selected || !state.key || state.busy) return;
   if (!window.confirm("將這份 PDF 傳給 Google 辨識，可能使用你的 API 額度。確定送出？")) return;
+  diagnostics.newOperation();
   state.busy = true; refreshControls(); status("job-status", "正在建立辨識工作…");
   const documentId = state.selected;
   const requestKey = state.pendingJobKeys.get(documentId) || uuid();
@@ -420,7 +636,7 @@ async function saveDraft() {
   finally { state.busy = false; refreshControls(); }
 }
 function selectedDocumentKind() {
-  return state.documents.find(doc => doc.id === state.selected)?.document_kind || null;
+  return state.localPreview?.kind || state.documents.find(doc => doc.id === state.selected)?.document_kind || null;
 }
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, char =>
@@ -591,6 +807,9 @@ function linkIssue(invoice, order) {
 }
 function selectTypedJob(job, kind) {
   const saved = state.recordSets.find(item => item.document_id === state.selected);
+  if (saved?.source_local_id) {
+    selectLocalSource(saved.source_local_id); return;
+  }
   if (saved && saved.source_job_id !== job.id) {
     const source = state.jobs.find(item => item.id === saved.source_job_id);
     if (source) { selectJob(source.id); return; }
@@ -834,13 +1053,15 @@ function recordError(error) {
     RECORD_LINK_NOT_FOUND: "連結的採購單品項不存在或已刪除；請重新選擇。",
     RECORD_LINKED_ROW: "此採購單品項仍被發票連結；請先在發票取消連結。",
     RECORD_ROWS_INVALID: "品項資料有誤；請核對各欄提示。若未顯示欄位提示，請重新載入後核對。",
-    RECORD_SOURCE_NOT_FOUND: "來源辨識工作不可用；需同一登入工作區的成功管理辨識。",
+    RECORD_SOURCE_NOT_FOUND: "來源不可用；需同一登入工作區的成功管理辨識或本機解析來源。",
+    LOCAL_SOURCE_CONFLICT: "這份文件已有不同的本機解析來源；請重新載入核對。",
+    LOCAL_DOCUMENT_NOT_FOUND: "文件不存在或不是支援的單頁採購憑單。",
     RECORD_ROW_ID_CONFLICT: "記錄品項識別與其他文件衝突，請重新載入。",
   };
   return messages[error.code] || safeError(error);
 }
 async function saveRecordSet() {
-  if (!state.job || state.job.state !== "done" || state.busy) return;
+  if (!(state.job?.state === "done" || state.localSource || state.localPreview) || state.busy) return;
   const checked = collectRecordRows();
   if (checked.issues.length) {
     state.recordIssues = checked.issues; renderRecordIssues(checked.issues, true);
@@ -848,12 +1069,14 @@ async function saveRecordSet() {
     return;
   }
   state.recordIssues = []; renderRecordIssues([]);
+  if (state.localPreview) return saveLocalPreview(checked.rows);
   const submittedSerial = state.editSerial;
   state.busy = true; refreshControls(); status("draft-status", "正在保存人工確認的記錄…");
   try {
+    const source = state.localSource ? {source_local_id: state.localSource.id} : {source_job_id: state.job.id};
     const record = await api(`management/record-sets/${state.selected}`, {
       method: "PUT", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({source_job_id: state.job.id, revision: state.revision, rows: checked.rows}),
+      body: JSON.stringify({...source, revision: state.revision, rows: checked.rows}),
     });
     state.recordSets = [record, ...state.recordSets.filter(item => item.document_id !== record.document_id)];
     state.revision = record.revision;
@@ -864,7 +1087,7 @@ async function saveRecordSet() {
     }
     state.rows = record.rows.map(row => ({...row})); state.dirty = false;
     editRecordRows(); renderManagementViews();
-    status("draft-status", `已保存修訂 ${record.revision}；原 PDF 與辨識結果仍保留。`, "good");
+    status("draft-status", `已保存修訂 ${record.revision}；原 PDF 與${state.localSource ? "本機候選" : "辨識結果"}仍保留。`, "good");
     showPage(record.kind === "purchase_order" ? "orders" : "invoices");
     showToast("人工確認記錄已保存", "good");
   } catch (error) {
@@ -882,10 +1105,12 @@ async function deleteRecordRow(documentId, rowId, kind) {
   try {
     const updated = await api(`management/record-sets/${documentId}`, {
       method: "PUT", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({source_job_id: set.source_job_id, revision: set.revision, rows}),
+      body: JSON.stringify({...(set.source_local_id ? {source_local_id: set.source_local_id}
+        : {source_job_id: set.source_job_id}), revision: set.revision, rows}),
     });
     state.recordSets = [updated, ...state.recordSets.filter(item => item.document_id !== documentId)];
-    if (state.selected === documentId && state.job?.id === updated.source_job_id) {
+    if (state.selected === documentId &&
+        (state.job?.id === updated.source_job_id || state.localSource?.id === updated.source_local_id)) {
       state.rows = updated.rows.map(row => ({...row})); state.revision = updated.revision;
       state.dirty = false; editRecordRows();
     }
@@ -956,11 +1181,15 @@ el("logout").addEventListener("click", async () => {
 });
 el("pdf").addEventListener("change", () => { state.uploadFile = null; state.uploadKey = null; refreshControls(); });
 el("upload").addEventListener("click", upload);
+el("local-pdf").addEventListener("change", () => refreshControls());
+el("local-parse").addEventListener("click", parseLocal);
+el("local-cancel").addEventListener("click", cancelLocalParse);
 el("retry-upload").addEventListener("click", upload);
 el("set-key").addEventListener("click", setKey);
 el("clear-key").addEventListener("click", clearKey);
 el("recognize").addEventListener("click", recognize);
 el("copy-job-error").addEventListener("click", copyJobError);
+el("copy-diagnostic").addEventListener("click", copyDiagnosticReport);
 el("add-row").addEventListener("click", () => {
   if (state.rows.length >= 100) return;
   const kind = selectedDocumentKind();

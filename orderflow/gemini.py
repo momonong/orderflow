@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import socket
+import ssl
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -76,12 +78,29 @@ def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool,
         if exc.code == 404:
             raise AIError("AI_MODEL_UNAVAILABLE", upstream_http_status=exc.code) from None
         raise AIUnknown("AI_HTTP_UNKNOWN", upstream_http_status=exc.code) from None
+    except http.client.IncompleteRead:
+        raise AIUnknown("AI_HTTP_UNKNOWN", transport_class="HTTP_TRUNCATED") from None
     except http.client.HTTPException:
         # A partial or malformed upstream HTTP response can arrive after the
         # request was processed. Keep the outcome unknown and return safe JSON.
-        raise AIUnknown("AI_HTTP_UNKNOWN") from None
-    except (OSError, TimeoutError):
-        raise AIUnknown("AI_TIMEOUT_UNKNOWN") from None
+        raise AIUnknown("AI_HTTP_UNKNOWN", transport_class="HTTP_MALFORMED") from None
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            category = "DNS"
+        elif isinstance(reason, ssl.SSLError):
+            category = "TLS"
+        elif isinstance(reason, ConnectionRefusedError):
+            category = "CONNECT_REFUSED"
+        elif isinstance(reason, TimeoutError):
+            category = "TIMEOUT_UNKNOWN"
+        else:
+            category = "IO_UNKNOWN"
+        raise AIUnknown("AI_TIMEOUT_UNKNOWN", transport_class=category) from None
+    except TimeoutError:
+        raise AIUnknown("AI_TIMEOUT_UNKNOWN", transport_class="TIMEOUT_UNKNOWN") from None
+    except OSError:
+        raise AIUnknown("AI_TIMEOUT_UNKNOWN", transport_class="IO_UNKNOWN") from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise AIError("AI_BAD_RESPONSE")
     try:

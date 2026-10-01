@@ -105,5 +105,30 @@ context.api = async (path, options) => {
   assert.equal(calls.length, 2, 'a second user confirmation is required');
   assert.equal(calls[0].body.request_key, calls[1].body.request_key,
     'explicit retry after unknown result retains the original paid-job idempotency key');
+  const report = el('diagnostic-report');
+  const details = {open: false};
+  report.closest = () => details;
+  report.focus = () => {report.focused = true;};
+  report.select = () => {report.selected = true;};
+  context.navigator = {clipboard: {writeText: async () => {throw Error('denied');}}};
+  await vm.runInContext('copyDiagnosticReport()', context);
+  assert.equal(details.open, true);
+  assert.equal(report.selected, true);
+  assert.match(el('diagnostic-copy-status').textContent, /手動|Ctrl/);
+  context.renderEvents = [];
+  vm.runInContext('diagnostics.record = phase => renderEvents.push(phase); diagnostics.flush = async () => {};', context);
+  vm.runInContext('state.documents = snapshot.documents; state.jobs = snapshot.jobs; state.selected = snapshot.documents[0].id; selectJob(snapshot.jobs[0].id)', context);
+  assert.deepEqual(context.renderEvents, ['job_rendered'],
+    'a fully rendered generic job records success');
+  context.renderEvents.length = 0;
+  vm.runInContext('editRows = () => { throw Error("synthetic editor failure"); }; try { selectJob(snapshot.jobs[0].id); } catch {}', context);
+  assert.deepEqual(context.renderEvents, ['render_failed'],
+    'generic editor failure records only failure');
+  assert.match(el('job-status').textContent, /無法顯示/);
+  assert.equal(el('save-draft').disabled, true);
+  context.renderEvents.length = 0;
+  vm.runInContext('state.documents[0].document_kind = "purchase_order"; selectTypedJob = () => { throw Error("synthetic typed editor failure"); }; try { selectJob(snapshot.jobs[0].id); } catch {}', context);
+  assert.deepEqual(context.renderEvents, ['render_failed'],
+    'typed editor failure records only failure');
   console.log('management save, refresh, paid confirmation and uncertain retry: ok');
 })().catch(error => {console.error(error); process.exitCode = 1;});

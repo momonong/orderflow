@@ -8,10 +8,12 @@ from typing import Protocol
 
 class AIError(Exception):
     def __init__(self, code: str, *, upstream_http_status: int | None = None,
-                 upstream_reason: str | None = None):
+                 upstream_reason: str | None = None,
+                 transport_class: str | None = None):
         self.code = code
         self.upstream_http_status = upstream_http_status
         self.upstream_reason = upstream_reason
+        self.transport_class = transport_class
         super().__init__(code)
 
 

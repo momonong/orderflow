@@ -703,3 +703,5 @@ input[type=password],input[type=text],input[type=number],input[type=search] {
 .record-grid [aria-invalid="true"] {border:2px solid var(--red)}
 .record-field-error {display:block;color:var(--red);font-size:12px;line-height:1.45;margin-top:4px}
 .record-field-error[hidden] {display:none}
+#diagnostic-report {display:block;width:100%;box-sizing:border-box;margin-top:12px;
+  font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
