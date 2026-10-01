@@ -20,8 +20,7 @@ const context = vm.createContext({
 });
 vm.runInContext(diagnosticSource, context);
 vm.runInContext(source, context);
-vm.runInContext(`let firstRender = true;
-  renderRows = () => { if (firstRender) {firstRender = false; throw Error("synthetic DOM failure");} };
+vm.runInContext(`renderRows = () => { throw Error("persistent synthetic DOM failure"); };
   updateRealControls = () => {}; reportReady = () => {};`, context);
 context.job = {id: "11111111-1111-4111-8111-111111111111", mode: "mock",
   state: "done", steps: {ai: "pass", format: "pass"},
@@ -29,9 +28,10 @@ context.job = {id: "11111111-1111-4111-8111-111111111111", mode: "mock",
 vm.runInContext("showJob(job)", context);
 assert.match(el("ai-status").textContent, /結果未能顯示/);
 assert.match(el("report").value, /結果渲染：失敗/);
-assert.doesNotMatch(el("report").value, /synthetic DOM failure/);
+assert.doesNotMatch(el("report").value, /persistent synthetic DOM failure/);
 assert.match(vm.runInContext("diagnostics.summary()", context), /phase=render_failed/);
 assert.doesNotMatch(vm.runInContext("diagnostics.summary()", context), /phase=job_rendered/);
+vm.runInContext("renderRows = () => {};", context);
 vm.runInContext("showJob(job)", context);
 assert.match(vm.runInContext("diagnostics.summary()", context), /phase=job_rendered/);
 console.log("job render failure stays visible and content-free: ok");

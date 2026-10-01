@@ -373,11 +373,11 @@ function showJob(job) {
       nextStep(`${kind}已完成。請核對品項，再到步驟 4 複製報告。`);
       diagnostics.record("job_rendered", "jobs/" + job.id);
     } catch {
-      renderRows($("result-body"), []);
       mark("render", "fail", {code: "RENDER_FAILED"});
       diagnostics.record("render_failed", "jobs/" + job.id, {code: "RENDER_FAILED"});
       setStatus("ai-status", "結果未能顯示。請複製測試報告傳回提供連結的人。", "fail");
       nextStep("結果顯示有問題。請到步驟 4 複製報告。");
+      try { renderRows($("result-body"), []); } catch { /* Keep the failure visible if DOM cleanup also fails. */ }
     }
   } else {
     renderRows($("result-body"), []);
