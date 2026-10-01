@@ -12,7 +12,7 @@
 
 ## 限制與保護
 
-- 只向 systemd journal 輸出固定欄位：版本、UTC 毫秒時間、事件、階段、固定路由、狀態、耗時、UUID、固定錯誤或上游分類。沒有 PDF 內容、品項、檔名、key、Cookie、IP、User-Agent、header、query、HTTP body、Google 回應正文或原始例外文字。
+- 只向 systemd journal 輸出固定欄位：版本、UTC 毫秒時間、事件、階段、固定路由、狀態、耗時、UUID、固定錯誤或上游分類。格式驗證失敗另可記固定原因、從 0 起算的品項索引、白名單欄位、固定型態及超長文字的區間（201–500、501–1000、超過 1000 字），不記原始值。沒有 PDF 內容、品項、檔名、key、Cookie、IP、User-Agent、header、query、HTTP body、Google 回應正文或原始例外文字。
 - POST /orderflow/api/diagnostics 必須登入、同源 Origin、既有自訂 header；每筆只接受固定欄位與列舉、最多 12 個事件和 4096 bytes。每登入會話最多每分鐘 12 次，伺服器整體最多每分鐘 600 個 audit 事件；超過上限不影響業務請求。瀏覽器只在已看到應用程式標記時嘗試自動送出最少事件，5 秒節流，失敗後停止自動送出，且不重試業務操作。複製資訊仍可手動使用。
 - 不新增監控服務、持久化診斷資料表、全域 journald／Caddy／Cloudflare 設定。journal 的實際保存期限取決於主機現有設定；本候選未改它。容量滿或紀錄寫入失敗時，不能把缺少事件解讀為請求未發生。
 - 操作者依使用者複製的 trace_id 查詢：journalctl -u orderflow --since 'YYYY-MM-DD HH:MM:SS' --grep 'TRACE_UUID' --no-pager。依 request_id 或 job_id 再查同次請求與背景工作。搜尋輸出仍須在授權的本機終端處理，不貼出整段 journal。
@@ -35,3 +35,21 @@
 - 預覽網址為 `http://127.0.0.1:18770/orderflow/`，systemd user unit `orderflow-safe-diagnostics-preview-7116c3e.service` 僅綁 `127.0.0.1`，資料目錄 `/tmp/orderflow-safe-diagnostics-preview-7116c3e/data`。合成測試密碼可在本機互動終端讀 `/tmp/orderflow-safe-diagnostics-preview-7116c3e/test-password`；不要貼進聊天。此預覽與原有 8765 服務使用不同程序、連接埠及資料目錄。
 - 以 Codex 內建瀏覽器重新核對：合成科雅 PDF 在畫面讀到 2 筆，尚未按確認前資料庫 documents、jobs、management_local_sources 均為 0；390px 視窗無整頁水平溢出，鍵盤 Enter 可展開格式說明。預覽的 app.js、manage.js、diagnostics.js 回應位元與本機候選一致；登入頁 200、匿名 bootstrap 401。可用瀏覽器清單沒有獨立 Chrome 或 Edge，因此兩者尚未驗證。
 - 預覽完成後停止命令：`systemctl --user stop orderflow-safe-diagnostics-preview-7116c3e.service`。停止不會刪除隔離資料或原有 8765 服務；清理該暫存資料目錄前應先確認不再需要驗收證據。
+
+## 公司端一次試用後的查找方式（本機候選，尚未上線）
+
+表姐在公司用已授權的正式入口試一次，記下當地時間及畫面狀態。若頁面可載入而請求失敗，按管理頁「複製診斷資訊」；若已有失敗／未知的辨識工作，再按該筆「複製此筆錯誤資訊」。只交給被授權處理 OrderFlow 的人，不附 PDF、API key 或網站密碼。剪貼簿被拒時，頁面會選取可手動複製的摘要。若整個網站頁面都無法載入，瀏覽器程式無法提供複製按鈕；此時只記瀏覽器錯誤畫面和時間，主機是否收到請求仍是未知。
+
+後台操作者在 ASUS 的授權終端，先確認查詢時間採用該主機本地時區，將時間窗限制在試用前後數分鐘。以下 `TRACE_UUID`、`REQUEST_UUID`、`JOB_UUID` 是收到的識別字，不是憑證；不要把整段 journal 貼到聊天或工單。
+
+```bash
+sudo journalctl -u orderflow.service --since 'YYYY-MM-DD HH:MM:SS' --until 'YYYY-MM-DD HH:MM:SS' --no-pager -o cat --grep 'TRACE_UUID'
+sudo journalctl -u orderflow.service --since 'YYYY-MM-DD HH:MM:SS' --until 'YYYY-MM-DD HH:MM:SS' --no-pager -o cat --grep 'REQUEST_UUID'
+sudo journalctl -u orderflow.service --since 'YYYY-MM-DD HH:MM:SS' --until 'YYYY-MM-DD HH:MM:SS' --no-pager -o cat --grep 'JOB_UUID'
+```
+
+先以 trace 找 `http.received` 與 `http.db_committed` 內的 request/job ID，再依 job ID 找背景 `real_job`。`http.db_committed` 的 `job_id` 連接建立工作的請求與背景工作；`real_job.db_committed` 在失敗時只代表**失敗狀態已保存**。`response_written` 只證明應用程式寫入 socket 返回；若是 `response_write_unknown`，先查工作列表，切勿自動重送可能計費的 AI 工作。`ai_start` 後無 `ai_response`，不能推定 Google 是否收到或計費。`result_format_invalid` 的固定原因可定位型態、欄位或長度區間；一般程式異常應是 `internal_unknown`，不能冒稱 Google 格式錯。
+
+合成測試驗證的事件順序範例（識別字省略，非公司端實際日誌）：`http.received → http.db_committed(job_id) → http.response_written(202)`，同一 job 為 `real_job.start → ai_start → ai_response → db_committed → result_format_invalid(code=RESULT_FORMAT_INVALID, format_reason=FIELD_TYPE, item_index=0, field=qty, actual_type=number)`。這能證明應用程式收到並保存了失敗工作，且驗證器拒絕第 1 筆 `qty` 的型態；不揭露該值、PDF 內容，也不代表上游無計費。另一個合成測試讓 adapter 拋出非格式 `ValueError`，記為 `internal_unknown`，不誤記 `result_format_invalid`。
+
+查無事件時，先核對 journal 權限、時間窗、保留期限、該次服務程序是否曾重啟及每分鐘 600 筆的 audit 限流；瀏覽器上傳診斷本身也可能被入口攔截、登入失效、5 秒節流或每會話每分鐘 12 次限制。缺席不能證明請求未到主機。此候選的詳細格式原因尚未部署，ASUS 現行版只能依既有事件與工作狀態判讀；上線需另行批准與驗證，不應把本機合成測試當成表姐的公司端驗收。

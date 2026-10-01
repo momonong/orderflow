@@ -21,7 +21,8 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 from orderflow.ai import AIError, AIUnknown
-from orderflow.app import AppServer, Handler, Store
+from orderflow.app import (AppServer, Handler, ResultFormatError, Store,
+                           validate_management_result, validate_result)
 from orderflow.gemini import GeminiAdapter, MODEL, _generate
 
 ORIGIN = "https://momonong.me"
@@ -138,6 +139,7 @@ class PublicAiTests(unittest.TestCase):
             for bad in (
                 {**event, "pdf_text": "PRIVATE_PDF_SENTINEL"},
                 {**event, "code": "PRIVATE_KEY_SENTINEL"},
+                {**event, "format_reason": "FIELD_TYPE"},
                 {**event, "route": ["management_jobs"]},
                 {**event, "phase": ["http_received"]},
             ):
@@ -154,6 +156,102 @@ class PublicAiTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_PDF_SENTINEL", output)
         self.assertNotIn("PRIVATE_KEY_SENTINEL", output)
         self.assertNotIn(FAKE_KEY, output)
+
+    def test_result_format_reasons_are_fixed_and_content_free(self):
+        cases = (
+            ([], "ROOT_TYPE", "array", None, None),
+            ({"items": {}}, "ITEMS_TYPE", "object", None, None),
+            ({"items": [{}] * 101}, "ITEMS_COUNT", None, None, None),
+            ({"items": [None]}, "ITEM_TYPE", "null", 0, None),
+            ({"items": [{"qty": 7}]}, "FIELD_TYPE", "number", 0, "qty"),
+            ({"items": [{"product": "PRIVATE_MARKER" * 20}]}, "FIELD_LENGTH", None, 0, "product"),
+            ({"items": [{"client": "PRIVATE_MARKER\x00"}]}, "FIELD_NUL", None, 0, "client"),
+        )
+        for value, reason, actual_type, item_index, field in cases:
+            with self.subTest(reason=reason), self.assertRaises(ResultFormatError) as raised:
+                validate_management_result(value)
+            self.assertEqual(str(raised.exception), "RESULT_FORMAT_INVALID")
+            details = raised.exception.audit_metadata
+            self.assertEqual(details["format_reason"], reason)
+            self.assertEqual(details.get("actual_type"), actual_type)
+            self.assertEqual(details.get("item_index"), item_index)
+            self.assertEqual(details.get("field"), field)
+            self.assertNotIn("PRIVATE_MARKER", str(details))
+        with self.assertRaises(ResultFormatError) as raised:
+            validate_result({"items": [{"description": "ok", "quantity": -1}]})
+        self.assertEqual(raised.exception.audit_metadata,
+                         {"format_reason": "FIELD_RANGE", "item_index": 0, "field": "quantity"})
+
+    def test_real_job_format_log_links_request_job_and_safe_reason(self):
+        headers = {"Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+                   "X-File-SHA256": hashlib.sha256(PDF).hexdigest(),
+                   "X-Request-Key": str(uuid.uuid4()), "X-Document-Kind": "purchase_order"}
+        status, document, _ = self.request("POST", "/orderflow/api/management/documents",
+                                           PDF, headers, self.cookie)
+        self.assertEqual(status, 201)
+        self.post_json("/orderflow/api/key", {"key": FAKE_KEY})
+
+        def submit_and_wait(trace, request):
+            status, job, _ = self.post_json("/orderflow/api/management/jobs", {
+                "document_id": document["id"], "request_key": str(uuid.uuid4()), "scenario": "real"
+            }, headers={"X-Orderflow-Trace-Id": trace,
+                        "X-Orderflow-Request-Id": request})
+            self.assertEqual(status, 202)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                result = self.request("GET", "/orderflow/api/management/jobs/" + job["id"],
+                                      cookie=self.cookie)[1]
+                if result["state"] not in {"queued", "running"}:
+                    return job["id"], result
+                time.sleep(0.02)
+            self.fail("synthetic job did not finish")
+
+        def wait_audit_phase(log, phase):
+            deadline = time.monotonic() + 2
+            while f'"phase":"{phase}"' not in log.getvalue():
+                if time.monotonic() >= deadline:
+                    self.fail(f"synthetic audit phase {phase} was not written")
+                time.sleep(0.01)
+
+        trace, request = str(uuid.uuid4()), str(uuid.uuid4())
+        log = io.StringIO()
+        with patch("orderflow.diagnostics._MAX_EVENTS", 100000), redirect_stderr(log):
+            with patch.object(GeminiAdapter, "recognize", return_value={"items": [
+                    {"client": "PRIVATE_CUSTOMER_MARKER", "qty": 7}]}):
+                job_id, job = submit_and_wait(trace, request)
+                wait_audit_phase(log, "result_format_invalid")
+        self.assertEqual((job["state"], job["error_code"]),
+                         ("failed", "RESULT_FORMAT_INVALID"))
+        records = [json.loads(line.removeprefix("orderflow_audit "))
+                   for line in log.getvalue().splitlines()
+                   if line.startswith("orderflow_audit ")]
+        request_phases = [row["phase"] for row in records if row["id"] == request]
+        self.assertIn("received", request_phases)
+        self.assertLess(request_phases.index("db_committed"),
+                        request_phases.index("response_written"))
+        self.assertIn(job_id, [row.get("job_id") for row in records if row["id"] == request])
+        job_records = [row for row in records if row["id"] == job_id]
+        self.assertTrue(all(row.get("trace_id") == trace for row in job_records))
+        self.assertEqual([row["phase"] for row in job_records],
+                         ["start", "ai_start", "ai_response", "db_committed",
+                          "result_format_invalid"])
+        failure = job_records[-1]
+        self.assertEqual((failure["code"], failure["format_reason"], failure["item_index"],
+                          failure["field"], failure["actual_type"]),
+                         ("RESULT_FORMAT_INVALID", "FIELD_TYPE", 0, "qty", "number"))
+        self.assertNotIn("PRIVATE_CUSTOMER_MARKER", log.getvalue())
+        self.assertNotIn(FAKE_KEY, log.getvalue())
+
+        log = io.StringIO()
+        with patch("orderflow.diagnostics._MAX_EVENTS", 100000), redirect_stderr(log):
+            with patch.object(GeminiAdapter, "recognize", side_effect=ValueError("PRIVATE_INTERNAL_MARKER")):
+                _, unknown = submit_and_wait(str(uuid.uuid4()), str(uuid.uuid4()))
+                wait_audit_phase(log, "internal_unknown")
+        self.assertEqual((unknown["state"], unknown["error_code"]),
+                         ("unknown", "INTERNAL_UNKNOWN"))
+        self.assertIn('"phase":"internal_unknown"', log.getvalue())
+        self.assertNotIn('"phase":"result_format_invalid"', log.getvalue())
+        self.assertNotIn("PRIVATE_INTERNAL_MARKER", log.getvalue())
 
     def test_trace_response_matches_request_and_commit_precedes_response(self):
         trace = str(uuid.uuid4())

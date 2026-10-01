@@ -32,13 +32,22 @@ CLIENT_CODES = {
     "AI_UNAVAILABLE", "AI_TIMEOUT_UNKNOWN", "AI_NOT_CONFIGURED", "AI_RATE_LIMITED",
     "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED", "AI_MODEL_UNAVAILABLE",
     "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "KEY_REQUIRED", "JOB_LIMIT",
+    "RESULT_FORMAT_INVALID",
 }
 SAFE_FIELDS = {
     "route", "trace_id", "request_id", "job_id", "http_status",
     "app_http_status", "upstream_http_status", "upstream_reason", "code",
     "duration_ms", "response_type", "marker", "source", "created",
     "transport_class",
+    "format_reason", "item_index", "field", "actual_type", "length_bucket",
 }
+FORMAT_REASONS = {"ROOT_TYPE", "ITEMS_TYPE", "ITEMS_COUNT", "ITEM_TYPE",
+                  "FIELD_TYPE", "FIELD_LENGTH", "FIELD_NUL", "FIELD_RANGE"}
+FORMAT_FIELDS = {"description", "quantity", "orderNo", "invoiceNo", "client",
+                 "product", "code", "qty", "unitPrice", "amount", "currency",
+                 "date", "incoterms", "unit"}
+FORMAT_TYPES = {"null", "boolean", "string", "object", "array", "number", "other"}
+LENGTH_BUCKETS = {"201_500", "501_1000", "OVER_1000"}
 REASONS = {"INVALID_ARGUMENT", "FAILED_PRECONDITION", "UNCLASSIFIED"}
 TYPES = {"JSON", "HTML", "TEXT", "OTHER", "MISSING"}
 MARKERS = {"APP", "MISSING"}
@@ -81,6 +90,16 @@ def _safe_field(key: str, value: object) -> bool:
         return isinstance(value, str) and value in TRANSPORT_CLASSES
     if key == "code":
         return isinstance(value, str) and value in CLIENT_CODES
+    if key == "format_reason":
+        return isinstance(value, str) and value in FORMAT_REASONS
+    if key == "item_index":
+        return type(value) is int and 0 <= value < 100
+    if key == "field":
+        return isinstance(value, str) and value in FORMAT_FIELDS
+    if key == "actual_type":
+        return isinstance(value, str) and value in FORMAT_TYPES
+    if key == "length_bucket":
+        return isinstance(value, str) and value in LENGTH_BUCKETS
     if key == "created":
         return type(value) is bool
     return False

@@ -27,7 +27,7 @@ from pypdf import PdfReader
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .diagnostics import audit_event, client_report
-from .gemini import GeminiAdapter, MODEL as GEMINI_MODEL
+from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
 
 VERSION = "0.3.0"
@@ -765,41 +765,97 @@ def run_real_job(store: Store, job_id: str, document_id: str, adapter: GeminiAda
         slot.release()
 
 
+class ResultFormatError(ValueError):
+    """A fixed, content-free description of a response validation failure."""
+
+    def __init__(self, reason: str, *, item_index: int | None = None,
+                 field: str | None = None, actual_type: str | None = None,
+                 length_bucket: str | None = None):
+        super().__init__("RESULT_FORMAT_INVALID")
+        self.audit_metadata: dict[str, object] = {"format_reason": reason}
+        if item_index is not None:
+            self.audit_metadata["item_index"] = item_index
+        if field is not None:
+            self.audit_metadata["field"] = field
+        if actual_type is not None:
+            self.audit_metadata["actual_type"] = actual_type
+        if length_bucket is not None:
+            self.audit_metadata["length_bucket"] = length_bucket
+
+
+def format_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if type(value) in {int, float}:
+        return "number"
+    return "other"
+
+
+def format_length_bucket(length: int) -> str:
+    return "201_500" if length <= 500 else "501_1000" if length <= 1000 else "OVER_1000"
+
+
+def result_items(value: object) -> list:
+    if not isinstance(value, dict):
+        raise ResultFormatError("ROOT_TYPE", actual_type=format_type(value))
+    items = value.get("items")
+    if not isinstance(items, list):
+        raise ResultFormatError("ITEMS_TYPE", actual_type=format_type(items))
+    if len(items) > 100:
+        raise ResultFormatError("ITEMS_COUNT")
+    return items
+
+
 def validate_result(value: object) -> list[dict]:
-    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
-        raise ValueError("RESULT_FORMAT_INVALID")
-    rows = value["items"]
-    if len(rows) > 100:
-        raise ValueError("RESULT_FORMAT_INVALID")
-    for row in rows:
-        if (not isinstance(row, dict) or not isinstance(row.get("description"), str)
-                or len(row["description"]) > 200 or type(row.get("quantity")) is not int
-                or row["quantity"] < 0):
-            raise ValueError("RESULT_FORMAT_INVALID")
+    rows = result_items(value)
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ResultFormatError("ITEM_TYPE", item_index=index, actual_type=format_type(row))
+        description = row.get("description")
+        if not isinstance(description, str):
+            raise ResultFormatError("FIELD_TYPE", item_index=index, field="description",
+                                    actual_type=format_type(description))
+        if len(description) > 200:
+            raise ResultFormatError("FIELD_LENGTH", item_index=index, field="description",
+                                    length_bucket=format_length_bucket(len(description)))
+        quantity = row.get("quantity")
+        if type(quantity) is not int:
+            raise ResultFormatError("FIELD_TYPE", item_index=index, field="quantity",
+                                    actual_type=format_type(quantity))
+        if quantity < 0:
+            raise ResultFormatError("FIELD_RANGE", item_index=index, field="quantity")
     return [{"description": row["description"], "quantity": row["quantity"]} for row in rows]
 
 
 def validate_management_result(value: object) -> list[dict]:
-    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
-        raise ValueError("RESULT_FORMAT_INVALID")
-    items = value["items"]
-    if len(items) > 100:
-        raise ValueError("RESULT_FORMAT_INVALID")
-    fields = ("orderNo", "invoiceNo", "client", "product", "code", "qty", "unitPrice",
-              "amount", "currency", "date", "incoterms", "unit")
+    items = result_items(value)
     rows = []
-    for item in items:
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
-            raise ValueError("RESULT_FORMAT_INVALID")
+            raise ResultFormatError("ITEM_TYPE", item_index=index, actual_type=format_type(item))
         row = {}
-        for field in fields:
+        for field in MANAGEMENT_FIELDS:
             raw = item.get(field)
             if raw is None:
                 row[field] = None
-            elif isinstance(raw, str) and len(raw) <= 200 and "\x00" not in raw:
-                row[field] = raw if raw.strip() else None
+            elif not isinstance(raw, str):
+                raise ResultFormatError("FIELD_TYPE", item_index=index, field=field,
+                                        actual_type=format_type(raw))
+            elif len(raw) > 200:
+                raise ResultFormatError("FIELD_LENGTH", item_index=index, field=field,
+                                        length_bucket=format_length_bucket(len(raw)))
+            elif "\x00" in raw:
+                raise ResultFormatError("FIELD_NUL", item_index=index, field=field)
             else:
-                raise ValueError("RESULT_FORMAT_INVALID")
+                row[field] = raw if raw.strip() else None
         rows.append(row)
     return rows
 
@@ -856,12 +912,13 @@ def run_job(store: Store, job_id: str, document_id: str, adapter: AIAdapter,
         if real:
             audit_event("real_job", job_id, "db_committed", trace)
             audit_event("real_job", job_id, "failed", {**trace, **metadata})
-    except ValueError:
+    except ResultFormatError as exc:
         store.set_job(job_id, state="failed", error_code="RESULT_FORMAT_INVALID",
                       steps={"ai": "pass", "format": "fail"}, finished_ms=now_ms())
         if real:
             audit_event("real_job", job_id, "db_committed", trace)
-            audit_event("real_job", job_id, "result_format_invalid", trace)
+            audit_event("real_job", job_id, "result_format_invalid",
+                        {**trace, "code": "RESULT_FORMAT_INVALID", **exc.audit_metadata})
     except Exception:
         store.set_job(job_id, state="unknown", error_code="INTERNAL_UNKNOWN",
                       steps={"ai": "unknown", "format": "not_run"}, finished_ms=now_ms())
