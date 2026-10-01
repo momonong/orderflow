@@ -53,3 +53,5 @@ sudo journalctl -u orderflow.service --since 'YYYY-MM-DD HH:MM:SS' --until 'YYYY
 合成測試驗證的事件順序範例（識別字省略，非公司端實際日誌）：`http.received → http.db_committed(job_id) → http.response_written(202)`，同一 job 為 `real_job.start → ai_start → ai_response → db_committed → result_format_invalid(code=RESULT_FORMAT_INVALID, format_reason=FIELD_TYPE, item_index=0, field=qty, actual_type=number)`。這能證明應用程式收到並保存了失敗工作，且驗證器拒絕第 1 筆 `qty` 的型態；不揭露該值、PDF 內容，也不代表上游無計費。另一個合成測試讓 adapter 拋出非格式 `ValueError`，記為 `internal_unknown`，不誤記 `result_format_invalid`。
 
 查無事件時，先核對 journal 權限、時間窗、保留期限、該次服務程序是否曾重啟及每分鐘 600 筆的 audit 限流；瀏覽器上傳診斷本身也可能被入口攔截、登入失效、5 秒節流或每會話每分鐘 12 次限制。缺席不能證明請求未到主機。此候選的詳細格式原因尚未部署，ASUS 現行版只能依既有事件與工作狀態判讀；上線需另行批准與驗證，不應把本機合成測試當成表姐的公司端驗收。
+
+格式原因修正提交 `db1264a` 只在測試程序中執行；上節的 18770 預覽是在此修正前啟動的 Python 程序，尚未載入新後端程式，不可用它驗收 `format_reason`。原有 8765 預覽及 ASUS 正式服務也未因本次提交而重啟或切換。
