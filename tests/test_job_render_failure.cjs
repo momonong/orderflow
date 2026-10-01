@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("web/app.js", "utf8").split("\ninitialize().catch(")[0];
+const diagnosticSource = fs.readFileSync("web/diagnostics.js", "utf8");
 const elements = new Map();
 function el(id) {
   if (!elements.has(id)) elements.set(id, {
@@ -14,8 +15,10 @@ function el(id) {
 const context = vm.createContext({
   window: {}, document: {getElementById: el},
   crypto: {randomUUID: () => "00000000-0000-4000-8000-000000000000"},
-  navigator: {}, Date, console, Set, Math, JSON
+  navigator: {}, Date, console, Set, Math, JSON,
+  fetch: async () => ({ok: true})
 });
+vm.runInContext(diagnosticSource, context);
 vm.runInContext(source, context);
 vm.runInContext(`let firstRender = true;
   renderRows = () => { if (firstRender) {firstRender = false; throw Error("synthetic DOM failure");} };
@@ -27,4 +30,8 @@ vm.runInContext("showJob(job)", context);
 assert.match(el("ai-status").textContent, /結果未能顯示/);
 assert.match(el("report").value, /結果渲染：失敗/);
 assert.doesNotMatch(el("report").value, /synthetic DOM failure/);
+assert.match(vm.runInContext("diagnostics.summary()", context), /phase=render_failed/);
+assert.doesNotMatch(vm.runInContext("diagnostics.summary()", context), /phase=job_rendered/);
+vm.runInContext("showJob(job)", context);
+assert.match(vm.runInContext("diagnostics.summary()", context), /phase=job_rendered/);
 console.log("job render failure stays visible and content-free: ok");

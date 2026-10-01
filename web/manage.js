@@ -331,32 +331,41 @@ async function copyJobError() {
 function selectJob(id) {
   const job = state.jobs.find(item => item.id === id && item.document_id === state.selected);
   if (!job) { clearDraft(); return; }
-  state.job = job; state.localSource = null; state.localPreview = null;
-  renderJobs(); renderJobErrorTools(job);
-  diagnostics.record("job_rendered", `management/jobs/${id}`);
-  void diagnostics.flush(true);
-  if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
-    clearDraftEditor(); pollJob(id); return; }
-  if (job.state !== "done") { status("job-status",
-    job.state === "unknown"
-      ? "辨識結果不明。請求可能已送達 Google 並計費；請勿連續按辨識。稍後重新載入，若仍不清楚請複製下方資訊。"
-      : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。",
-    job.state === "unknown" ? "unknown" : "error");
-    clearDraftEditor(); return; }
-  status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
-  const selectedDoc = state.documents.find(doc => doc.id === state.selected);
-  if (selectedDoc?.document_kind === "purchase_order" || selectedDoc?.document_kind === "invoice") {
-    selectTypedJob(job, selectedDoc.document_kind);
-    return;
+  try {
+    state.job = job; state.localSource = null; state.localPreview = null;
+    renderJobs(); renderJobErrorTools(job);
+    if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
+      clearDraftEditor(); pollJob(id); return; }
+    if (job.state !== "done") { status("job-status",
+      job.state === "unknown"
+        ? "辨識結果不明。請求可能已送達 Google 並計費；請勿連續按辨識。稍後重新載入，若仍不清楚請複製下方資訊。"
+        : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。",
+      job.state === "unknown" ? "unknown" : "error");
+      clearDraftEditor(); return; }
+    status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
+    const selectedDoc = state.documents.find(doc => doc.id === state.selected);
+    if (selectedDoc?.document_kind === "purchase_order" || selectedDoc?.document_kind === "invoice") {
+      selectTypedJob(job, selectedDoc.document_kind);
+      diagnostics.record("job_rendered", `management/jobs/${id}`);
+      void diagnostics.flush(true);
+      return;
+    }
+    el("save-draft").textContent = "儲存草稿";
+    const saved = state.drafts.find(draft => draft.source_job_id === id);
+    state.revision = saved?.revision || 0; state.dirty = !saved;
+    el("draft-source").textContent = `來源辨識 ${id}；${saved ? `已儲存修訂 ${saved.revision}` : "尚未儲存"}。`;
+    const rows = saved?.rows || job.result || [];
+    editRows(rows.length ? rows : [{description: "", quantity: 0}]);
+    status("draft-status", saved ? `已儲存修訂 ${saved.revision}。` : "請核對後按「儲存草稿」。未儲存的編修會消失。", saved ? "good" : "");
+    refreshControls();
+    diagnostics.record("job_rendered", `management/jobs/${id}`);
+    void diagnostics.flush(true);
+  } catch {
+    diagnostics.record("render_failed", `management/jobs/${id}`, {code: "RENDER_FAILED"});
+    void diagnostics.flush(true);
+    el("save-draft").disabled = true;
+    status("job-status", "辨識結果無法顯示。請複製診斷資訊並聯絡提供網站的人。", "error");
   }
-  el("save-draft").textContent = "儲存草稿";
-  const saved = state.drafts.find(draft => draft.source_job_id === id);
-  state.revision = saved?.revision || 0; state.dirty = !saved;
-  el("draft-source").textContent = `來源辨識 ${id}；${saved ? `已儲存修訂 ${saved.revision}` : "尚未儲存"}。`;
-  const rows = saved?.rows || job.result || [];
-  editRows(rows.length ? rows : [{description: "", quantity: 0}]);
-  status("draft-status", saved ? `已儲存修訂 ${saved.revision}。` : "請核對後按「儲存草稿」。未儲存的編修會消失。", saved ? "good" : "");
-  refreshControls();
 }
 function clearDraftEditor() {
   resetRecordIssues();

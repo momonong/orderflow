@@ -371,6 +371,7 @@ function showJob(job) {
         ? "Google 回傳的 PDF 品項已顯示；請人工核對內容。下一步：複製測試報告。"
         : "範例結果已顯示。這些品項與你的 PDF 內容無關。下一步：複製測試報告。", "pass");
       nextStep(`${kind}已完成。請核對品項，再到步驟 4 複製報告。`);
+      diagnostics.record("job_rendered", "jobs/" + job.id);
     } catch {
       renderRows($("result-body"), []);
       mark("render", "fail", {code: "RENDER_FAILED"});
@@ -394,8 +395,7 @@ function showJob(job) {
     }
   }
   if (job.mode === "real") setStatus("real-status", $("ai-status").textContent, $("ai-status").dataset.state);
-  diagnostics.record("job_rendered", "jobs/" + job.id);
-  void diagnostics.flush(true);
+  if (job.state === "done") void diagnostics.flush(true);
   if (!["queued", "running"].includes(job.state)) reportReady();
 }
 async function runBasic() {
