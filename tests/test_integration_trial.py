@@ -15,7 +15,7 @@ import bcrypt
 
 from pypdf import PdfWriter
 from orderflow.app import AppServer, Store
-from orderflow.trial import MAX_DOCUMENTS_PER_SESSION
+from orderflow.trial import MAX_DOCUMENTS_PER_SESSION, MAX_PDF_BYTES, validate_file
 
 
 def fields(*, number="PO-1", quantity="10", currency="USD", unit="EA", code="P-1", description="Original", amount="20.00"):
@@ -41,6 +41,25 @@ class TrialBookTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_pdf_limit_fits_public_request_envelope(self):
+        self.assertEqual(MAX_PDF_BYTES, 6 * 1024 * 1024)
+        raw = b"%PDF-" + b"x" * (MAX_PDF_BYTES - 5)
+        file = {"base64": base64.b64encode(raw).decode(),
+                "sha256": hashlib.sha256(raw).hexdigest()}
+        self.assertEqual(validate_file("pdf", file, lambda _: 1)[0], raw)
+        oversized = {"base64": base64.b64encode(raw + b"x").decode(),
+                     "sha256": hashlib.sha256(raw + b"x").hexdigest()}
+        with self.assertRaisesRegex(ValueError, "TRIAL_FILE_TOO_LARGE"):
+            validate_file("pdf", oversized, lambda _: 1)
+
+        worst = fields(code="\\" * 80, description="\\" * 300, unit="\\" * 24)
+        worst["header"]["company"] = "\\" * 120
+        worst["header"]["number"] = "\\" * 80
+        worst["rows"] = [{**worst["rows"][0], "id": str(uuid.uuid4())} for _ in range(100)]
+        payload = document(source="pdf", file=file, candidate=worst, confirmed=worst)
+        self.assertLess(len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()),
+                        9 * 1024 * 1024)
 
     def test_isolation_idempotency_revision_and_reopen(self):
         original = fields()

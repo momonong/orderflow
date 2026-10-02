@@ -5,6 +5,8 @@ import {createActivityLock} from "/orderflow/integration-activity.mjs";
 
 const $ = id => document.getElementById(id);
 const apiRoot = "/orderflow/api/integration/";
+const maxTrialPdfBytes = 6 * 1024 * 1024;
+const maxTrialRequestBytes = 9 * 1024 * 1024;
 const blankRow = () => ({id: crypto.randomUUID(), code: "", description: "", quantity: null,
   unit: "", unit_price: null, amount: null});
 const blankFields = () => ({header: {company: "", number: "", date: "", currency: ""}, rows: [blankRow()]});
@@ -204,11 +206,11 @@ function fileSelected() {
   state.file = replacement; state.fileSha = null; state.matrix = null; state.candidate = null;
   $("mapping").hidden = true; $("parse-file").disabled = !state.file;
   if (!state.file) return sourceStatus("尚未選檔。");
-  const limit = state.source === "pdf" ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
+  const limit = state.source === "pdf" ? maxTrialPdfBytes : 2 * 1024 * 1024;
   const extension = state.source === "pdf" ? ".pdf" : ".xlsx";
   if (!state.file.name.toLowerCase().endsWith(extension) || state.file.size < 1 || state.file.size > limit) {
     state.file = null; $("parse-file").disabled = true;
-    return sourceStatus(`只支援不超過 ${state.source === "pdf" ? "8" : "2"} MB 的 ${extension} 原檔。`, true);
+    return sourceStatus(`只支援不超過 ${state.source === "pdf" ? "6" : "2"} MiB 的 ${extension} 原檔。`, true);
   }
   state.fields = blankFields(); state.requestKey = crypto.randomUUID();
   renderEditor(); state.parseBaseline = JSON.stringify(collectFields());
@@ -333,13 +335,22 @@ async function saveDocument(approved = false) {
         return;
       }
       clearDuplicateReview();
-      status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
       let saved;
-      if (selected) saved = await api(`integration/documents/${selected.id}`, "PUT",
-        {revision: selected.revision, confirmed});
-      else saved = await api("integration/documents", "POST", {request_key: draft.requestKey,
-        kind: draft.kind, source: draft.source, candidate: draft.candidate,
-        confirmed, file: sourceFile}, 45000);
+      if (selected) {
+        status("正在保存人工確認欄位。");
+        saved = await api(`integration/documents/${selected.id}`, "PUT",
+          {revision: selected.revision, confirmed});
+      }
+      else {
+        const payload = {request_key: draft.requestKey, kind: draft.kind, source: draft.source,
+          candidate: draft.candidate, confirmed, file: sourceFile};
+        if (new Blob([JSON.stringify(payload)]).size >= maxTrialRequestBytes) {
+          status("原檔與欄位合計已達網站 9 MiB 的請求上限；請縮小後再保存。尚未上傳。", true);
+          return;
+        }
+        status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
+        saved = await api("integration/documents", "POST", payload, 45000);
+      }
       state.selected = saved; state.file = null; state.fileSha = saved.file_sha256;
       state.fields = copy(saved.confirmed);
       state.candidate = saved.candidate; state.kind = saved.kind; state.source = saved.source;
