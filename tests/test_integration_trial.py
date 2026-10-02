@@ -165,6 +165,29 @@ class TrialBookTests(unittest.TestCase):
             self.trial.add_document(self.owner, document())
         self.assertEqual(len(self.trial.documents(self.owner)), MAX_DOCUMENTS_PER_SESSION)
 
+    def test_product_revision_many_aliases_and_document_values(self):
+        saved_doc, _ = self.trial.add_document(self.owner, document(confirmed=fields(
+            description="Original source description", amount="12.00")))
+        original = self.trial.add_product(self.owner, {"label": "Original suggestion", "unit": "EA",
+            "aliases": [{"company": "Synthetic Co", "code": "P-1"}]})
+        updated = self.trial.update_product(self.owner, original["id"], {
+            "revision": 1, "label": "Corrected suggestion", "unit": "BOX",
+            "aliases": [{"company": f"Company {index}", "code": f"PART-{index}"}
+                        for index in range(3)]})
+        self.assertEqual((updated["revision"], len(updated["aliases"])), (2, 3))
+        self.assertEqual(self.trial.products(self.owner)[0]["unit"], "BOX")
+        with self.assertRaisesRegex(ValueError, "TRIAL_PRODUCT_VERSION_CONFLICT"):
+            self.trial.update_product(self.owner, original["id"], {"revision": 1,
+                "label": "Stale", "unit": "EA", "aliases": original["aliases"]})
+        with self.assertRaisesRegex(LookupError, "TRIAL_PRODUCT_NOT_FOUND"):
+            self.trial.update_product(self.other, original["id"], {"revision": 2,
+                "label": "Foreign", "unit": "EA", "aliases": original["aliases"]})
+        document_after = self.trial.document(self.owner, saved_doc["id"])
+        self.assertEqual(document_after["confirmed"]["rows"][0]["description"],
+                         "Original source description")
+        self.assertEqual(document_after["confirmed"]["rows"][0]["unit_price"], "2.00")
+        self.assertEqual(document_after["confirmed"]["rows"][0]["amount"], "12.00")
+
 
 class TrialApiTests(unittest.TestCase):
     def setUp(self):
@@ -209,6 +232,10 @@ class TrialApiTests(unittest.TestCase):
         self.assertEqual(code, 200)
         code, _, _ = self.request("GET", "/orderflow/integration-xlsx.mjs")
         self.assertEqual(code, 200)
+        code, _, _ = self.request("GET", "/orderflow/integration-comparison.mjs")
+        self.assertEqual(code, 200)
+        code, _, _ = self.request("GET", "/orderflow/integration-duplicates.mjs")
+        self.assertEqual(code, 200)
         code, result, _ = self.request("GET", "/orderflow/api/integration/bootstrap")
         self.assertEqual((code, result["error_code"]), (401, "AUTH_REQUIRED"))
         owner, other = self.login(), self.login()
@@ -237,6 +264,23 @@ class TrialApiTests(unittest.TestCase):
         self.assertEqual(result["totals_by_currency"], {"purchase_order": {}, "invoice": {}})
         self.assertEqual(result["missing_currency_documents"], 2)
         self.assertEqual(result["missing_amount_documents"], 1)
+
+    def test_product_put_revision_conflict_and_session(self):
+        owner, other = self.login(), self.login()
+        code, created, _ = self.request("POST", "/orderflow/api/integration/products",
+                                        {"label": "Old", "unit": "EA", "aliases": [
+                                            {"company": "Synthetic Co", "code": "P-1"}]}, owner)
+        self.assertEqual(code, 201)
+        path = "/orderflow/api/integration/products/" + created["id"]
+        value = {"revision": 1, "label": "New", "unit": "BOX", "aliases": [
+            {"company": "Synthetic Co", "code": "P-1"},
+            {"company": "Other Co", "code": "Q-2"}]}
+        code, saved, _ = self.request("PUT", path, value, owner)
+        self.assertEqual((code, saved["revision"], len(saved["aliases"])), (200, 2, 2))
+        code, stale, _ = self.request("PUT", path, {**value, "label": "Stale"}, owner)
+        self.assertEqual((code, stale["error_code"]), (409, "TRIAL_PRODUCT_VERSION_CONFLICT"))
+        code, foreign, _ = self.request("PUT", path, {**value, "revision": 2}, other)
+        self.assertEqual((code, foreign["error_code"]), (404, "TRIAL_PRODUCT_NOT_FOUND"))
 
 
 if __name__ == "__main__":

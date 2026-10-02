@@ -1232,6 +1232,8 @@ class Handler(BaseHTTPRequestHandler):
             PREFIX + "integration.js": ("integration.js", "text/javascript"),
             PREFIX + "integration.css": ("integration.css", "text/css"),
             PREFIX + "integration-xlsx.mjs": ("integration-xlsx.mjs", "text/javascript"),
+            PREFIX + "integration-comparison.mjs": ("integration-comparison.mjs", "text/javascript"),
+            PREFIX + "integration-duplicates.mjs": ("integration-duplicates.mjs", "text/javascript"),
         }
         if path == PREFIX + "integration":
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)
@@ -1713,6 +1715,28 @@ class Handler(BaseHTTPRequestHandler):
             self.error(403, "REQUEST_HEADER_REQUIRED")
             return
         path = urlsplit(self.path).path
+        if path.startswith(PREFIX + "api/integration/products/"):
+            product_id = path[len(PREFIX + "api/integration/products/"):]
+            if not trial_uuid(product_id):
+                self.error(404, "TRIAL_PRODUCT_NOT_FOUND")
+                return
+            value = self.get_json(8192)
+            if value is None:
+                return
+            try:
+                product = self.server.store.trial.update_product(session_id, product_id, value)
+            except LookupError:
+                self.error(404, "TRIAL_PRODUCT_NOT_FOUND")
+                return
+            except ValueError as error:
+                code = str(error)
+                self.error(409 if code in {"TRIAL_PRODUCT_VERSION_CONFLICT", "TRIAL_ALIAS_CONFLICT"} else 400,
+                           code if code in {"TRIAL_PRODUCT_VERSION_CONFLICT", "TRIAL_ALIAS_CONFLICT"}
+                           else "TRIAL_PRODUCT_INVALID")
+                return
+            self.audit_commit(False)
+            self.json_response(200, product)
+            return
         if path.startswith(PREFIX + "api/integration/documents/"):
             document_id = path[len(PREFIX + "api/integration/documents/"):]
             if not trial_uuid(document_id):

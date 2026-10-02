@@ -109,6 +109,27 @@ def validate_fields(value: object) -> dict:
     return {"header": clean_header, "rows": clean_rows}
 
 
+def validate_product(value: object) -> tuple[str, str, list[tuple[str, str]]]:
+    if not isinstance(value, dict) or set(value) != {"label", "unit", "aliases"}:
+        raise ValueError("TRIAL_PRODUCT_INVALID")
+    label = text(value["label"], 120)
+    unit = text(value["unit"], 24)
+    aliases = value["aliases"]
+    if not label or not isinstance(aliases, list) or not 1 <= len(aliases) <= 20:
+        raise ValueError("TRIAL_PRODUCT_INVALID")
+    clean = []
+    for alias in aliases:
+        if not isinstance(alias, dict) or set(alias) != {"company", "code"}:
+            raise ValueError("TRIAL_PRODUCT_INVALID")
+        company, code = text(alias["company"], 120), text(alias["code"], 80)
+        if not company or not code:
+            raise ValueError("TRIAL_PRODUCT_INVALID")
+        clean.append((company, code))
+    if len(set(clean)) != len(clean):
+        raise ValueError("TRIAL_PRODUCT_INVALID")
+    return label, unit, clean
+
+
 def fingerprint(kind: str, source: str, candidate: dict | None,
                 confirmed: dict, file_sha: str | None) -> str:
     body = json.dumps({"kind": kind, "source": source, "candidate": candidate,
@@ -417,7 +438,8 @@ class TrialBook:
         with self.store.db() as db:
             products = db.execute("SELECT * FROM trial_products WHERE session_id=? ORDER BY label,id",
                                   (session_id,)).fetchall()
-            aliases = db.execute("SELECT product_id,company,code FROM trial_product_codes WHERE session_id=?",
+            aliases = db.execute("SELECT product_id,company,code FROM trial_product_codes WHERE session_id=? "
+                                 "ORDER BY product_id,company,code",
                                  (session_id,)).fetchall()
         by_product: dict[str, list[dict]] = {}
         for alias in aliases:
@@ -428,23 +450,7 @@ class TrialBook:
                  "aliases": by_product.get(row["id"], [])} for row in products]
 
     def add_product(self, session_id: str, value: object) -> dict:
-        if not isinstance(value, dict) or set(value) != {"label", "unit", "aliases"}:
-            raise ValueError("TRIAL_PRODUCT_INVALID")
-        label = text(value["label"], 120)
-        unit = text(value["unit"], 24)
-        aliases = value["aliases"]
-        if not label or not isinstance(aliases, list) or not 1 <= len(aliases) <= 20:
-            raise ValueError("TRIAL_PRODUCT_INVALID")
-        clean = []
-        for alias in aliases:
-            if not isinstance(alias, dict) or set(alias) != {"company", "code"}:
-                raise ValueError("TRIAL_PRODUCT_INVALID")
-            company, code = text(alias["company"], 120), text(alias["code"], 80)
-            if not company or not code:
-                raise ValueError("TRIAL_PRODUCT_INVALID")
-            clean.append((company, code))
-        if len(set(clean)) != len(clean):
-            raise ValueError("TRIAL_PRODUCT_INVALID")
+        label, unit, clean = validate_product(value)
         product_id = str(uuid.uuid4())
         with self.store.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -457,6 +463,44 @@ class TrialBook:
             except sqlite3.IntegrityError as error:
                 raise ValueError("TRIAL_ALIAS_CONFLICT") from error
         return {"id": product_id, "label": label, "unit": unit, "revision": 1,
+                "aliases": [{"company": company, "code": code} for company, code in clean]}
+
+    def update_product(self, session_id: str, product_id: str, value: object) -> dict:
+        if (not valid_uuid(product_id) or not isinstance(value, dict) or
+                set(value) != {"revision", "label", "unit", "aliases"} or
+                type(value["revision"]) is not int or value["revision"] < 1):
+            raise ValueError("TRIAL_PRODUCT_INVALID")
+        label, unit, clean = validate_product({key: value[key]
+                                               for key in ("label", "unit", "aliases")})
+        with self.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM trial_products WHERE id=? AND session_id=?",
+                             (product_id, session_id)).fetchone()
+            if not old:
+                raise LookupError("TRIAL_PRODUCT_NOT_FOUND")
+            current = db.execute("SELECT company,code FROM trial_product_codes "
+                                 "WHERE product_id=? AND session_id=? ORDER BY company,code",
+                                 (product_id, session_id)).fetchall()
+            if (old["label"] == label and old["unit"] == unit and
+                    [(row["company"], row["code"]) for row in current] == sorted(clean)):
+                return {"id": product_id, "label": label, "unit": unit,
+                        "revision": old["revision"],
+                        "aliases": [{"company": company, "code": code} for company, code in clean]}
+            if old["revision"] != value["revision"]:
+                raise ValueError("TRIAL_PRODUCT_VERSION_CONFLICT")
+            db.execute("UPDATE trial_products SET label=?,unit=?,revision=revision+1 "
+                       "WHERE id=? AND session_id=? AND revision=?",
+                       (label, unit, product_id, session_id, old["revision"]))
+            db.execute("DELETE FROM trial_product_codes WHERE product_id=? AND session_id=?",
+                       (product_id, session_id))
+            try:
+                db.executemany("INSERT INTO trial_product_codes "
+                               "(product_id,session_id,company,code) VALUES (?,?,?,?)",
+                               [(product_id, session_id, company, code) for company, code in clean])
+            except sqlite3.IntegrityError as error:
+                raise ValueError("TRIAL_ALIAS_CONFLICT") from error
+        return {"id": product_id, "label": label, "unit": unit,
+                "revision": old["revision"] + 1,
                 "aliases": [{"company": company, "code": code} for company, code in clean]}
 
     def search(self, session_id: str, filters: dict[str, str]) -> list[dict]:

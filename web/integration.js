@@ -1,4 +1,6 @@
 import {readXlsx} from "/orderflow/integration-xlsx.mjs";
+import {summarizeItems} from "/orderflow/integration-comparison.mjs";
+import {suspectedDuplicates} from "/orderflow/integration-duplicates.mjs";
 
 const $ = id => document.getElementById(id);
 const apiRoot = "/orderflow/api/integration/";
@@ -7,8 +9,9 @@ const blankRow = () => ({id: crypto.randomUUID(), code: "", description: "", qua
 const blankFields = () => ({header: {company: "", number: "", date: "", currency: ""}, rows: [blankRow()]});
 const copy = value => JSON.parse(JSON.stringify(value));
 const state = {documents: [], links: [], products: [], selected: null, fields: blankFields(),
-  candidate: null, file: null, matrix: null, requestKey: crypto.randomUUID(), busy: false,
-  source: "manual", kind: "purchase_order", baseline: "", parseBaseline: "", filters: {}, viewed: []};
+  candidate: null, file: null, fileSha: null, matrix: null, requestKey: crypto.randomUUID(), busy: false,
+  source: "manual", kind: "purchase_order", baseline: "", parseBaseline: "", filters: {}, viewed: [],
+  selectedProduct: null, productAliases: [], productBaseline: "", duplicateApproval: null};
 const labels = {company: "公司", number: "單號", date: "文件日期", currency: "幣別",
   code: "品號", description: "描述", quantity: "數量", unit: "單位",
   unit_price: "單價", amount: "金額"};
@@ -25,7 +28,10 @@ function codeMessage(code) {
     TRIAL_LINKED_ROW: "已對應品項不能移除。",
     TRIAL_ALLOCATION_CONFLICT: "分配數量超過發票或採購單品項的已填數量。",
     TRIAL_LINK_CONFLICT: "分配數量需要兩側單位相同且有數量。",
-    TRIAL_PDF_CHECK_TIMEOUT: "PDF 安全檢查逾時；檔案未保存。"})[code] || code || "連線或伺服器錯誤";
+    TRIAL_PDF_CHECK_TIMEOUT: "PDF 安全檢查逾時；檔案未保存。",
+    TRIAL_PRODUCT_VERSION_CONFLICT: "主檔已有較新修訂；畫面保留你的修改，可先核對後手動載入最新版。",
+    TRIAL_ALIAS_CONFLICT: "公司與品號組合已被另一個主檔使用。",
+    TRIAL_PRODUCT_INVALID: "主檔描述及每組公司、品號都需完整；最多 20 組。"})[code] || code || "連線或伺服器錯誤";
 }
 function parseMessage(code) {
   return ({LOCAL_PAGE_COUNT_UNSUPPORTED: "目前只支援單頁科雅採購憑單",
@@ -118,6 +124,7 @@ function renderEditor() {
   } else readable.textContent = "沒有成功解析的候選值；以人工欄位為準。";
   $("open-original").disabled = !(state.file || state.selected?.file_sha256);
   renderRows();
+  updateDuplicateHint();
 }
 function collectFields() {
   for (const key of ["company", "number", "date", "currency"]) state.fields.header[key] = $("field-" + key).value.trim();
@@ -126,6 +133,20 @@ function collectFields() {
 function rememberBaseline() {state.baseline = JSON.stringify(collectFields());}
 function hasUnsaved() {return !!state.file || JSON.stringify(collectFields()) !== state.baseline;}
 function allowDiscard() {return !hasUnsaved() || window.confirm("目前有未保存的欄位或原檔。確定放棄並切換？");}
+function duplicates(fields, fileSha = state.fileSha) {
+  return suspectedDuplicates(state.documents, state.selected?.id, state.kind, fields, fileSha);
+}
+function duplicateText(matches) {
+  return matches.map(({doc, reasons}) => `${doc.kind === "invoice" ? "發票" : "採購單"} ${doc.confirmed.header.company || "未填公司"}／${doc.confirmed.header.number || "未填單號"}（${reasons.join("、")}）`).join("；");
+}
+function updateDuplicateHint() {
+  if ($("editor").hidden) return;
+  const matches = duplicates(collectFields());
+  $("duplicate-hint").textContent = matches.length ? `疑似重複：${duplicateText(matches)}。保存時仍需人工確認。` : "";
+}
+function clearDuplicateReview() {
+  state.duplicateApproval = null; $("duplicate-review").hidden = true;
+}
 function localValidate(fields) {
   const h = fields.header;
   if (h.date) {
@@ -150,7 +171,8 @@ function localValidate(fields) {
 }
 function newDocument(force = false) {
   if (!force && !allowDiscard()) return;
-  state.selected = null; state.file = null; state.matrix = null; state.candidate = null;
+  clearDuplicateReview();
+  state.selected = null; state.file = null; state.fileSha = null; state.matrix = null; state.candidate = null;
   state.fields = blankFields(); state.requestKey = crypto.randomUUID();
   state.source = "manual"; state.kind = "purchase_order";
   $("kind").value = "purchase_order"; $("source").value = "manual";
@@ -162,7 +184,9 @@ function chooseSource() {
   if (state.selected) {$("source").value = state.source;
     return status("編修已存文件時不能更換原檔來源；請新增文件。", true);}
   if (!allowDiscard()) {$("source").value = state.source; return;}
-  state.source = $("source").value; state.file = null; state.matrix = null; state.candidate = null;
+  clearDuplicateReview();
+  state.source = $("source").value; state.file = null; state.fileSha = null;
+  state.matrix = null; state.candidate = null;
   $("source-file").value = ""; $("source-file").disabled = state.source === "manual";
   $("source-file").accept = state.source === "pdf" ? ".pdf,application/pdf" : ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   $("parse-file").disabled = true; $("mapping").hidden = true;
@@ -174,7 +198,8 @@ function fileSelected() {
   const replacement = $("source-file").files[0] || null;
   if ((state.file || hasUnsaved()) && !allowDiscard()) {$("source-file").value = "";
     $("parse-file").disabled = !state.file; return;}
-  state.file = replacement; state.matrix = null; state.candidate = null;
+  clearDuplicateReview();
+  state.file = replacement; state.fileSha = null; state.matrix = null; state.candidate = null;
   $("mapping").hidden = true; $("parse-file").disabled = !state.file;
   if (!state.file) return sourceStatus("尚未選檔。");
   const limit = state.source === "pdf" ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
@@ -186,6 +211,9 @@ function fileSelected() {
   state.fields = blankFields(); state.requestKey = crypto.randomUUID();
   renderEditor(); state.parseBaseline = JSON.stringify(collectFields());
   sourceStatus("原檔留在瀏覽器；按解析或直接人工核對。保存前不會上傳。");
+  void hashFile(state.file).then(sha => {if (state.file === replacement) {
+    state.fileSha = sha; updateDuplicateHint();
+  }}).catch(() => {if (state.file === replacement) sourceStatus("原檔雜湊無法在瀏覽器計算；請重新選檔。", true);});
 }
 async function parsePdf(file) {
   const bytes = await file.arrayBuffer();
@@ -261,6 +289,10 @@ function applyMapping() {
   state.candidate = copy(state.fields); renderEditor(); state.parseBaseline = JSON.stringify(collectFields());
   sourceStatus(`已套用 ${data.length} 筆欄位對照；請逐欄核對，尚未保存。`);
 }
+async function hashFile(file) {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+}
 async function filePayload(file) {
   if (!file) return null;
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -271,20 +303,34 @@ async function filePayload(file) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
   return {base64: btoa(binary), sha256};
 }
-async function saveDocument() {
+async function saveDocument(approved = false) {
   if (state.busy) return;
   const confirmed = collectFields(); const invalid = localValidate(confirmed);
   if (invalid) return status(invalid, true);
   state.busy = true; $("save-document").disabled = true;
-  status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
   try {
+    const sourceFile = state.selected ? null : await filePayload(state.file);
+    const matches = duplicates(confirmed, sourceFile?.sha256);
+    const approval = JSON.stringify({kind: state.kind, selectedId: state.selected?.id,
+      confirmed, fileSha: sourceFile?.sha256 || state.selected?.file_sha256 || null,
+      duplicateIds: matches.map(match => match.doc.id)});
+    if (matches.length && (!approved || state.duplicateApproval !== approval)) {
+      state.duplicateApproval = approval;
+      $("duplicate-review-text").textContent = `找到疑似重複試用文件：${duplicateText(matches)}。請核對後決定是否仍要另外保存。`;
+      $("duplicate-review").hidden = false;
+      status("尚未送出；請核對疑似重複文件。", true);
+      return;
+    }
+    clearDuplicateReview();
+    status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
     let saved;
     if (state.selected) saved = await api(`integration/documents/${state.selected.id}`, "PUT",
       {revision: state.selected.revision, confirmed});
     else saved = await api("integration/documents", "POST", {request_key: state.requestKey,
       kind: state.kind, source: state.source, candidate: state.candidate,
-      confirmed, file: await filePayload(state.file)}, 45000);
-    state.selected = saved; state.file = null; state.fields = copy(saved.confirmed);
+      confirmed, file: sourceFile}, 45000);
+    state.selected = saved; state.file = null; state.fileSha = saved.file_sha256;
+    state.fields = copy(saved.confirmed);
     state.candidate = saved.candidate; state.kind = saved.kind; state.source = saved.source;
     state.requestKey = crypto.randomUUID(); $("reload-document").hidden = true;
     renderEditor(); rememberBaseline(); status(`已保存；修訂 ${saved.revision}。`);
@@ -298,8 +344,10 @@ async function saveDocument() {
 function openDocument(saved, force = false) {
   if (!saved) return;
   if (!force && !allowDiscard()) return;
+  clearDuplicateReview();
   state.selected = saved; state.fields = copy(saved.confirmed); state.candidate = saved.candidate;
-  state.source = saved.source; state.kind = saved.kind; state.file = null; state.matrix = null;
+  state.source = saved.source; state.kind = saved.kind; state.file = null;
+  state.fileSha = saved.file_sha256; state.matrix = null;
   $("mapping").hidden = true; $("source-file").value = ""; $("source-file").disabled = true;
   $("parse-file").disabled = true; $("reload-document").hidden = true;
   renderEditor(); rememberBaseline(); $("editor").scrollIntoView({block: "start"});
@@ -363,6 +411,30 @@ function renderLinks() {
     remove.addEventListener("click", async () => {try {await api(`integration/links/${link.id}`, "DELETE"); await refresh();
       status("已撤回對應；文件保留。 ");} catch (error) {status(`撤回失敗：${codeMessage(error.code)}`, true);}});
     line.append(text, remove); target.append(line);}
+  renderComparison();
+}
+function renderComparison() {
+  const target = $("comparison-list"); target.replaceChildren();
+  const entries = summarizeItems(state.documents, state.links);
+  if (!entries.length) {target.textContent = "尚無試用文件品項。"; return;}
+  const table = document.createElement("table");
+  const head = document.createElement("thead"); const heading = document.createElement("tr");
+  for (const label of ["文件", "品項", "單位", "已配", "未配", "狀態"]) {
+    const cell = document.createElement("th"); cell.textContent = label; heading.append(cell);
+  }
+  head.append(heading); table.append(head);
+  const body = document.createElement("tbody");
+  for (const entry of entries) {
+    const row = document.createElement("tr");
+    for (const value of [
+      `${entry.kind === "invoice" ? "發票" : "採購單"} ${entry.number || "未填單號"}`,
+      entry.code || entry.description || "未填品項", entry.unit || "未填",
+      entry.allocated ?? "未知", entry.remaining ?? "未知", entry.status]) {
+      const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(body); target.append(table);
 }
 async function addLink() {
   const invoice = $("invoice-item").value.split(":"), po = $("po-item").value.split(":");
@@ -376,17 +448,66 @@ async function addLink() {
 function renderProducts() {
   const target = $("product-list"); target.replaceChildren();
   for (const product of state.products) {const line = document.createElement("div"); line.className = "list-item";
-    line.textContent = `${product.label} · 建議單位 ${product.unit || "未填"} · ` +
-      product.aliases.map(alias => `${alias.company}: ${alias.code}`).join("、"); target.append(line);}
-  if ($( "editor").hidden === false) state.fields.rows.forEach((_, index) => renderSuggestion(index));
+    const description = document.createElement("span");
+    description.textContent = `${product.label} · 建議單位 ${product.unit || "未填"} · ` +
+      product.aliases.map(alias => `${alias.company}: ${alias.code}`).join("、") + " ";
+    const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "編輯主檔";
+    edit.addEventListener("click", () => openProduct(product));
+    line.append(description, edit); target.append(line);}
+  if (!$("editor").hidden) state.fields.rows.forEach((_, index) => renderSuggestion(index));
 }
-async function addProduct() {
-  const aliases = ["a", "b"].map(suffix => ({company: $("alias-company-" + suffix).value.trim(),
-    code: $("alias-code-" + suffix).value.trim()})).filter(value => value.company || value.code);
-  try {await api("integration/products", "POST", {label: $("product-label").value.trim(),
-    unit: $("product-unit").value.trim(), aliases});}
-  catch (error) {return status(`主檔保存失敗：${codeMessage(error.code)}`, true);}
-  status("主檔已保存；原文件欄位未改動。 ");
+function productDraft() {
+  return {label: $("product-label").value.trim(), unit: $("product-unit").value.trim(),
+    aliases: copy(state.productAliases).map(alias => ({company: alias.company.trim(), code: alias.code.trim()}))};
+}
+function rememberProductBaseline() {state.productBaseline = JSON.stringify(productDraft());}
+function productHasUnsaved() {return JSON.stringify(productDraft()) !== state.productBaseline;}
+function renderAliasRows() {
+  const target = $("alias-rows"); target.replaceChildren();
+  state.productAliases.forEach((alias, index) => {
+    const line = document.createElement("div"); line.className = "row-card";
+    const fields = document.createElement("div"); fields.className = "row-fields";
+    fields.append(field(`公司 ${index + 1}`, alias.company, value => {alias.company = value;}, 120),
+      field(`品號 ${index + 1}`, alias.code, value => {alias.code = value;}, 80));
+    const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "移除此別名";
+    remove.addEventListener("click", () => {if (state.productAliases.length <= 1)
+      return status("主檔至少需要一組公司品號。", true);
+    state.productAliases.splice(index, 1); renderAliasRows();});
+    line.append(fields, remove); target.append(line);
+  });
+  $("add-alias").disabled = state.productAliases.length >= 20;
+}
+function newProduct(force = false) {
+  if (!force && productHasUnsaved() && !window.confirm("主檔有未保存修改。確定放棄並新建？")) return;
+  state.selectedProduct = null; state.productAliases = [{company: "", code: ""}];
+  $("product-label").value = ""; $("product-unit").value = "";
+  $("product-mode").textContent = "新增主檔"; $("save-product").textContent = "建立主檔";
+  $("reload-product").hidden = true; renderAliasRows(); rememberProductBaseline();
+}
+function openProduct(product, force = false) {
+  if (!force && productHasUnsaved() && !window.confirm("主檔有未保存修改。確定放棄並切換？")) return;
+  state.selectedProduct = product; state.productAliases = copy(product.aliases);
+  $("product-label").value = product.label; $("product-unit").value = product.unit;
+  $("product-mode").textContent = `編修主檔；修訂 ${product.revision}`;
+  $("save-product").textContent = "保存主檔修訂"; $("reload-product").hidden = true;
+  renderAliasRows(); rememberProductBaseline(); $("product-mode").scrollIntoView({block: "start"});
+}
+async function saveProduct() {
+  const draft = productDraft();
+  if (!draft.label || !draft.aliases.length || draft.aliases.some(alias => !alias.company || !alias.code))
+    return status("請填主檔描述與每組公司、品號；空白別名可先移除。", true);
+  const current = state.selectedProduct;
+  try {
+    const saved = current ? await api(`integration/products/${current.id}`, "PUT",
+      {revision: current.revision, ...draft}) : await api("integration/products", "POST", draft);
+    state.selectedProduct = saved; state.productAliases = copy(saved.aliases);
+    $("product-mode").textContent = `編修主檔；修訂 ${saved.revision}`;
+    $("save-product").textContent = "保存主檔修訂"; $("reload-product").hidden = true;
+    renderAliasRows(); rememberProductBaseline(); status("主檔已保存；原文件欄位未改動。");
+  } catch (error) {
+    if (error.code === "TRIAL_PRODUCT_VERSION_CONFLICT") $("reload-product").hidden = false;
+    return status(`主檔保存失敗：${codeMessage(error.code)}`, true);
+  }
   try {await refresh();} catch {status("主檔已保存，但列表未能刷新；可重新載入。", true);}
 }
 async function exportCsv() {
@@ -402,7 +523,7 @@ async function refresh() {
   const data = await api("integration/bootstrap");
   $("workspace").hidden = false; $("login-section").hidden = true;
   state.documents = data.documents; state.links = data.links; state.products = data.products;
-  renderLinks(); renderProducts(); await search();
+  renderLinks(); renderProducts(); updateDuplicateHint(); await search();
 }
 async function login(event) {
   event.preventDefault(); const password = $("password").value; $("password").value = "";
@@ -411,7 +532,10 @@ async function login(event) {
 }
 $("login-form").addEventListener("submit", login);
 $("source").addEventListener("change", chooseSource);
-$("kind").addEventListener("change", () => {if (!state.selected) state.kind = $("kind").value;});
+$("kind").addEventListener("change", () => {if (!state.selected) {
+  clearDuplicateReview(); state.kind = $("kind").value; updateDuplicateHint();}});
+$("editor").addEventListener("input", clearDuplicateReview);
+for (const key of ["company", "number"]) $("field-" + key).addEventListener("input", updateDuplicateHint);
 $("source-file").addEventListener("change", fileSelected);
 $("parse-file").addEventListener("click", parseFile);
 $("new-manual").addEventListener("click", () => newDocument());
@@ -419,13 +543,32 @@ $("open-original").addEventListener("click", openOriginal);
 $("apply-mapping").addEventListener("click", applyMapping);
 $("add-row").addEventListener("click", () => {if (state.fields.rows.length >= 100) return status("最多 100 筆品項。", true);
   state.fields.rows.push(blankRow()); renderRows();});
-$("save-document").addEventListener("click", saveDocument);
+$("save-document").addEventListener("click", () => saveDocument());
+$("confirm-duplicate").addEventListener("click", () => saveDocument(true));
+$("cancel-duplicate").addEventListener("click", () => {
+  clearDuplicateReview(); status("已取消保存；原檔與欄位仍留在瀏覽器，沒有送出。");
+});
 $("reload-document").addEventListener("click", async () => {try {const fresh = await api(`integration/documents/${state.selected.id}`);
   openDocument(fresh, true); status("已載入最新版；先前未存修改已放棄。 ");}
   catch (error) {status(`重載失敗：${codeMessage(error.code)}`, true);}});
 $("search").addEventListener("click", search);
 $("export").addEventListener("click", exportCsv);
 $("add-link").addEventListener("click", addLink);
-$("add-product").addEventListener("click", addProduct);
-newDocument(true); refresh().catch(error => {$("login-section").hidden = false;
+$("add-alias").addEventListener("click", () => {if (state.productAliases.length >= 20)
+  return status("最多 20 組公司品號。", true);
+  state.productAliases.push({company: "", code: ""}); renderAliasRows();});
+$("save-product").addEventListener("click", saveProduct);
+$("new-product").addEventListener("click", () => newProduct());
+$("reload-product").addEventListener("click", async () => {
+  try {const data = await api("integration/bootstrap");
+    const fresh = data.products.find(product => product.id === state.selectedProduct?.id);
+    if (!fresh) return status("找不到原主檔；畫面修改仍保留。", true);
+    openProduct(fresh, true); state.products = data.products; renderProducts();
+    status("已載入最新版主檔；先前未存修改已放棄。");
+  } catch (error) {status(`重載主檔失敗：${codeMessage(error.code)}`, true);}
+});
+window.addEventListener("beforeunload", event => {if (hasUnsaved() || productHasUnsaved()) {
+  event.preventDefault(); event.returnValue = "";
+}});
+newDocument(true); newProduct(true); refresh().catch(error => {$("login-section").hidden = false;
   status(error.status === 401 ? "請先登入網站。" : `載入失敗：${codeMessage(error.code)}`, error.status !== 401);});
