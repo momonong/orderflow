@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderFlow 整合測試（新版）</title>
+  <link rel="stylesheet" href="/orderflow/integration.css">
+  <script type="module" src="/orderflow/integration.js"></script>
+</head>
+<body>
+<header><a href="/orderflow/">← 原管理頁</a><a href="/orderflow/test/">診斷測試</a><h1>整合測試（新版）</h1><span>合成資料試用</span></header>
+<main>
+  <p class="notice">採購單與發票在此僅是文件紀錄；數量對照不代表出貨、庫存或收款。此試用資料只屬於目前瀏覽器會話；清除 cookie 或換裝置後無法保證找回。</p>
+  <section id="login-section" class="card" hidden>
+    <h2>登入網站</h2><form id="login-form"><label>網站密碼 <input id="password" type="password" autocomplete="current-password" required></label><button>登入</button></form>
+  </section>
+  <div id="workspace" hidden>
+    <section class="card">
+      <h2>新增或核對文件</h2>
+      <p>選檔與解析只在此瀏覽器進行；按「確認並保存」後，原檔與人工確認欄位才上傳至網站主機。本頁尚未整合 Google 辨識，不執行 AI 或 OCR。原管理頁保留原有辨識功能。</p>
+      <div class="grid"><label>文件種類 <select id="kind"><option value="purchase_order">採購單</option><option value="invoice">發票</option></select></label>
+      <label>來源 <select id="source"><option value="manual">人工輸入</option><option value="pdf">PDF</option><option value="xlsx">Excel .xlsx</option></select></label>
+      <label>原檔 <input id="source-file" type="file" accept=".pdf,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled></label></div>
+      <div class="actions"><button id="parse-file" type="button" disabled>在瀏覽器解析</button><button id="new-manual" type="button">新建空白品項</button><button id="open-original" type="button" disabled>查看原檔</button></div>
+      <p id="source-status" role="status">尚未選檔。</p>
+      <div id="mapping" hidden><h3>Excel 欄位對照</h3><p>選擇標題列對應欄。文件標題可在下方逐欄補齊；未選欄位保留空白。</p><div id="mapping-fields" class="grid"></div><button id="apply-mapping" type="button">預覽對照結果</button><div id="xlsx-preview" class="table-wrap"></div></div>
+      <div id="editor" hidden>
+        <h3>逐欄核對</h3><p id="editor-mode"></p>
+        <div class="grid"><label>公司 <input id="field-company" maxlength="120"></label><label>單號 <input id="field-number" maxlength="80"></label>
+          <label>文件日期 <input id="field-date" placeholder="YYYY-MM-DD 或 YYYY/M/D" maxlength="10"></label><label>幣別 <input id="field-currency" placeholder="可留空；例如 USD" maxlength="3"></label></div>
+        <p class="small">數量最多 4 位小數；單價與金額最多 2 位小數。空白代表未知，不會自動填入。</p>
+        <div id="rows"></div><button id="add-row" type="button">新增品項</button>
+        <details><summary>解析候選值與原始資料</summary><div id="candidate-readable"></div><pre id="candidate-view">人工輸入；無解析候選值。</pre></details>
+        <div class="actions"><button id="save-document" type="button">確認並保存</button><button id="reload-document" type="button" hidden>放棄本次修改並載入最新版</button></div>
+      </div>
+    </section>
+    <section class="card"><h2>試用文件與查詢</h2>
+      <div class="grid"><label>公司 <input id="search-company"></label><label>單號 <input id="search-number"></label><label>品號 <input id="search-code"></label><label>日期 <input id="search-date" placeholder="YYYY-MM-DD"></label></div>
+      <div class="actions"><button id="search" type="button">查詢</button><button id="export" type="button">匯出目前篩選 CSV</button></div>
+      <p id="statistics" role="status"></p><div id="document-list"></div>
+    </section>
+    <section class="card"><h2>發票品項 ↔ 採購單品項</h2><p>由人明確指定，數量可留空。只有單位相同且填了數量時才計算分配；撤回不刪除文件。</p>
+      <div class="grid"><label>發票品項 <select id="invoice-item"></select></label><label>採購單品項 <select id="po-item"></select></label><label>分配數量 <input id="allocation" placeholder="未知可留空"></label></div>
+      <button id="add-link" type="button">新增對應</button><div id="link-list"></div>
+    </section>
+    <section class="card"><h2>跨公司品號主檔建議</h2><p>主檔描述與單位僅作提示，不改寫原文件描述、單位或交易單價。</p>
+      <div class="grid"><label>主檔描述 <input id="product-label" maxlength="120"></label><label>建議單位 <input id="product-unit" maxlength="24"></label>
+      <label>公司 A <input id="alias-company-a"></label><label>品號 A <input id="alias-code-a"></label><label>公司 B <input id="alias-company-b"></label><label>品號 B <input id="alias-code-b"></label></div>
+      <button id="add-product" type="button">建立主檔</button><div id="product-list"></div>
+    </section>
+  </div>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+</main>
+</body></html>

@@ -29,6 +29,7 @@ from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .diagnostics import BUILD_ID, audit_event, client_report
 from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
+from .trial import TrialBook, valid_uuid as trial_uuid
 
 VERSION = "0.3.0"
 PREFIX = "/orderflow/"
@@ -43,6 +44,7 @@ KEY_TTL_SECONDS = 15 * 60
 PURPOSES = {"diagnostic", "management"}
 MAX_DRAFT_JSON_BYTES = 32 * 1024
 MAX_RECORD_JSON_BYTES = 128 * 1024
+MAX_TRIAL_JSON_BYTES = 12 * 1024 * 1024
 LOCAL_PARSER_ID = "koya-purchase-v1"
 MAX_STORED_BYTES = 128 * 1024 * 1024
 MAX_DOCUMENTS_PER_SESSION = 20
@@ -218,6 +220,7 @@ class Store:
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
         self.db_path.chmod(0o600)
+        self.trial = TrialBook(self, pdf_page_count)
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -1068,6 +1071,8 @@ class Handler(BaseHTTPRequestHandler):
         }
         if tail in exact:
             return exact[tail]
+        if tail.startswith("integration/"):
+            return "integration"
         for prefix, label in (("jobs/", "job_get"),
                               ("management/jobs/", "management_job_get"),
                               ("management/record-sets/", "record_sets"),
@@ -1165,12 +1170,13 @@ class Handler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def get_json(self, max_bytes: int = MAX_JSON_BYTES) -> dict | None:
+    def get_json(self, max_bytes: int = MAX_JSON_BYTES,
+                 seconds: float | None = None) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", ""))
             if not 0 < length <= max_bytes:
                 raise ValueError
-            raw = self.read_body(length, JSON_DEADLINE_SECONDS)
+            raw = self.read_body(length, JSON_DEADLINE_SECONDS if seconds is None else seconds)
             if len(raw) != length:
                 self.error(400, "REQUEST_INCOMPLETE")
                 return None
@@ -1222,7 +1228,17 @@ class Handler(BaseHTTPRequestHandler):
             PREFIX + "test/": ("test.html", "text/html"),
             PREFIX + "app.js": ("app.js", "text/javascript"),
             PREFIX + "style.css": ("style.css", "text/css"),
+            PREFIX + "integration/": ("integration.html", "text/html"),
+            PREFIX + "integration.js": ("integration.js", "text/javascript"),
+            PREFIX + "integration.css": ("integration.css", "text/css"),
+            PREFIX + "integration-xlsx.mjs": ("integration-xlsx.mjs", "text/javascript"),
         }
+        if path == PREFIX + "integration":
+            self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+            self.send_header("Location", PREFIX + "integration/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if path == PREFIX + "test":
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)
             self.send_header("Location", PREFIX + "test/")
@@ -1272,6 +1288,86 @@ class Handler(BaseHTTPRequestHandler):
                                      "ai_model": GEMINI_MODEL,
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
             return
+        if path == PREFIX + "api/integration/bootstrap":
+            session_id = self.get_session()
+            if not session_id:
+                return
+            trial = self.server.store.trial
+            self.json_response(200, {"documents": trial.documents(session_id),
+                                     "links": trial.links(session_id),
+                                     "products": trial.products(session_id),
+                                     "auth_expires_ms": self.server.store.session_expires(session_id)})
+            return
+        if path == PREFIX + "api/integration/search":
+            session_id = self.get_session()
+            if not session_id:
+                return
+            from urllib.parse import parse_qs
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            allowed = {"company", "number", "code", "date"}
+            if set(query) - allowed or any(len(values) != 1 or len(values[0]) > 120
+                                           for values in query.values()):
+                self.error(400, "TRIAL_SEARCH_INVALID")
+                return
+            docs = self.server.store.trial.search(session_id,
+                                                  {key: values[0] for key, values in query.items()})
+            self.json_response(200, {"documents": docs,
+                                     **self.server.store.trial.statistics(docs)})
+            return
+        if path == PREFIX + "api/integration/export.csv":
+            session_id = self.get_session()
+            if not session_id:
+                return
+            from urllib.parse import parse_qs
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            allowed = {"company", "number", "code", "date"}
+            if set(query) - allowed or any(len(values) != 1 or len(values[0]) > 120
+                                           for values in query.values()):
+                self.error(400, "TRIAL_SEARCH_INVALID")
+                return
+            docs = self.server.store.trial.search(session_id,
+                                                  {key: values[0] for key, values in query.items()})
+            data = self.server.store.trial.csv_bytes(docs)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="orderflow-trial.csv"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(data)
+            self.audit_http("response_written", 200)
+            return
+        if path.startswith(PREFIX + "api/integration/documents/"):
+            session_id = self.get_session()
+            if not session_id:
+                return
+            tail = path[len(PREFIX + "api/integration/documents/"):]
+            if tail.endswith("/file"):
+                document_id = tail[:-5]
+                if not trial_uuid(document_id):
+                    self.error(404, "TRIAL_FILE_NOT_FOUND")
+                    return
+                source_file = self.server.store.trial.file(session_id, document_id)
+                if not source_file:
+                    self.error(404, "TRIAL_FILE_NOT_FOUND")
+                    return
+                data, content_type = source_file
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", "inline" if content_type == "application/pdf" else
+                                 'attachment; filename="orderflow-trial.xlsx"')
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+                self.audit_http("response_written", 200)
+                return
+            if trial_uuid(tail):
+                document = self.server.store.trial.document(session_id, tail)
+                self.json_response(200, document) if document else self.error(404, "TRIAL_DOCUMENT_NOT_FOUND")
+                return
         if path == PREFIX + "api/key":
             session_id = self.get_session()
             if session_id:
@@ -1398,6 +1494,58 @@ class Handler(BaseHTTPRequestHandler):
                 audit_event("client_observation", self.request_id(),
                             item["phase"], {**item, "source": "client"})
             self.json_response(200, {"status": "recorded"})
+            return
+        if path == PREFIX + "api/integration/documents":
+            value = self.get_json(MAX_TRIAL_JSON_BYTES, 30)
+            if value is None:
+                return
+            try:
+                document, created = self.server.store.trial.add_document(session_id, value)
+            except PDFCheckTimeout:
+                self.error(408, "TRIAL_PDF_CHECK_TIMEOUT")
+                return
+            except ValueError as error:
+                code = str(error)
+                allowed = {"TRIAL_FIELDS_INVALID", "TRIAL_FILE_INVALID", "TRIAL_FILE_TOO_LARGE",
+                           "TRIAL_IDEMPOTENCY_CONFLICT", "TRIAL_STORAGE_LIMIT"}
+                self.error(409 if code == "TRIAL_IDEMPOTENCY_CONFLICT" else
+                           413 if code in {"TRIAL_FILE_TOO_LARGE", "TRIAL_STORAGE_LIMIT"} else 400,
+                           code if code in allowed else "TRIAL_FIELDS_INVALID")
+                return
+            self.audit_commit(created)
+            self.json_response(201 if created else 200, document)
+            return
+        if path == PREFIX + "api/integration/links":
+            value = self.get_json(4096)
+            if value is None:
+                return
+            try:
+                link, created = self.server.store.trial.add_link(session_id, value)
+            except LookupError as error:
+                self.error(404, str(error))
+                return
+            except ValueError as error:
+                code = str(error)
+                self.error(409 if code in {"TRIAL_LINK_CONFLICT", "TRIAL_ALLOCATION_CONFLICT"} else 400,
+                           code if code in {"TRIAL_LINK_CONFLICT", "TRIAL_ALLOCATION_CONFLICT"}
+                           else "TRIAL_LINK_INVALID")
+                return
+            self.audit_commit(created)
+            self.json_response(201 if created else 200, link)
+            return
+        if path == PREFIX + "api/integration/products":
+            value = self.get_json(8192)
+            if value is None:
+                return
+            try:
+                product = self.server.store.trial.add_product(session_id, value)
+            except ValueError as error:
+                code = str(error)
+                self.error(409 if code == "TRIAL_ALIAS_CONFLICT" else 400,
+                           code if code == "TRIAL_ALIAS_CONFLICT" else "TRIAL_PRODUCT_INVALID")
+                return
+            self.audit_commit(True)
+            self.json_response(201, product)
             return
         if path == PREFIX + "api/key":
             value = self.get_json()
@@ -1527,6 +1675,20 @@ class Handler(BaseHTTPRequestHandler):
         session_id = self.get_session()
         if not session_id:
             return
+        path = urlsplit(self.path).path
+        if path.startswith(PREFIX + "api/integration/links/"):
+            link_id = path[len(PREFIX + "api/integration/links/"):]
+            if not trial_uuid(link_id):
+                self.error(404, "TRIAL_LINK_NOT_FOUND")
+                return
+            try:
+                self.server.store.trial.revoke_link(session_id, link_id)
+            except LookupError:
+                self.error(404, "TRIAL_LINK_NOT_FOUND")
+                return
+            self.audit_commit(True)
+            self.json_response(200, {"status": "revoked"})
+            return
         if urlsplit(self.path).path != PREFIX + "api/key":
             self.error(404, "NOT_FOUND")
             return
@@ -1551,6 +1713,29 @@ class Handler(BaseHTTPRequestHandler):
             self.error(403, "REQUEST_HEADER_REQUIRED")
             return
         path = urlsplit(self.path).path
+        if path.startswith(PREFIX + "api/integration/documents/"):
+            document_id = path[len(PREFIX + "api/integration/documents/"):]
+            if not trial_uuid(document_id):
+                self.error(404, "TRIAL_DOCUMENT_NOT_FOUND")
+                return
+            value = self.get_json(128 * 1024)
+            if value is None:
+                return
+            try:
+                document = self.server.store.trial.update_document(session_id, document_id, value)
+            except LookupError:
+                self.error(404, "TRIAL_DOCUMENT_NOT_FOUND")
+                return
+            except ValueError as error:
+                code = str(error)
+                conflicts = {"TRIAL_VERSION_CONFLICT", "TRIAL_LINKED_ROW",
+                             "TRIAL_LINK_CONFLICT", "TRIAL_ALLOCATION_CONFLICT"}
+                self.error(409 if code in conflicts else 400,
+                           code if code in conflicts else "TRIAL_FIELDS_INVALID")
+                return
+            self.audit_commit(False)
+            self.json_response(200, document)
+            return
         if path.startswith(PREFIX + "api/management/record-sets/"):
             document_id = path[len(PREFIX + "api/management/record-sets/"):]
             if not valid_uuid(document_id):
