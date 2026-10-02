@@ -1,6 +1,7 @@
 import {readXlsx} from "/orderflow/integration-xlsx.mjs";
 import {summarizeItems} from "/orderflow/integration-comparison.mjs";
 import {suspectedDuplicates} from "/orderflow/integration-duplicates.mjs";
+import {createActivityLock} from "/orderflow/integration-activity.mjs";
 
 const $ = id => document.getElementById(id);
 const apiRoot = "/orderflow/api/integration/";
@@ -9,9 +10,10 @@ const blankRow = () => ({id: crypto.randomUUID(), code: "", description: "", qua
 const blankFields = () => ({header: {company: "", number: "", date: "", currency: ""}, rows: [blankRow()]});
 const copy = value => JSON.parse(JSON.stringify(value));
 const state = {documents: [], links: [], products: [], selected: null, fields: blankFields(),
-  candidate: null, file: null, fileSha: null, matrix: null, requestKey: crypto.randomUUID(), busy: false,
+  candidate: null, file: null, fileSha: null, matrix: null, requestKey: crypto.randomUUID(),
   source: "manual", kind: "purchase_order", baseline: "", parseBaseline: "", filters: {}, viewed: [],
   selectedProduct: null, productAliases: [], productBaseline: "", duplicateApproval: null};
+const activity = createActivityLock($("workspace"));
 const labels = {company: "公司", number: "單號", date: "文件日期", currency: "幣別",
   code: "品號", description: "描述", quantity: "數量", unit: "單位",
   unit_price: "單價", amount: "金額"};
@@ -227,28 +229,31 @@ async function parsePdf(file) {
   }); } finally {worker.terminate();}
 }
 async function parseFile() {
-  const file = state.file; if (!file || state.busy) return;
+  const file = state.file; if (!file || activity.busy) return;
   if (JSON.stringify(collectFields()) !== state.parseBaseline &&
       !window.confirm("重新解析會替換目前人工編修的欄位。確定繼續？")) return;
-  state.busy = true; $("parse-file").disabled = true; sourceStatus("正在瀏覽器解析；尚未上傳…");
-  try {
-    if (state.source === "pdf") {
-      const parsed = await parsePdf(file);
-      state.kind = "purchase_order";
-      state.fields = {header: {company: parsed.rows[0]?.client || "", number: parsed.rows[0]?.orderNo || "",
-        date: parsed.rows[0]?.date || "", currency: parsed.rows[0]?.currency || ""},
-        rows: parsed.rows.map(row => ({id: crypto.randomUUID(), code: row.code || "",
-          description: row.product || "", quantity: row.qty || null, unit: row.unit || "",
-          unit_price: row.unitPrice || null, amount: row.amount || null}))};
-      state.candidate = copy(state.fields); renderEditor(); state.parseBaseline = JSON.stringify(collectFields());
-      sourceStatus(`讀到 ${state.fields.rows.length} 筆；請逐欄核對，尚未保存。`);
-    } else {
-      state.matrix = await readXlsx(file);
-      renderMapping(); sourceStatus(`讀到 ${state.matrix.length - 1} 列；先選欄位對照，尚未保存。`);
+  const source = state.source;
+  await activity.run(async () => {
+    sourceStatus("正在瀏覽器解析；尚未上傳…");
+    try {
+      if (source === "pdf") {
+        const parsed = await parsePdf(file);
+        state.kind = "purchase_order";
+        state.fields = {header: {company: parsed.rows[0]?.client || "", number: parsed.rows[0]?.orderNo || "",
+          date: parsed.rows[0]?.date || "", currency: parsed.rows[0]?.currency || ""},
+          rows: parsed.rows.map(row => ({id: crypto.randomUUID(), code: row.code || "",
+            description: row.product || "", quantity: row.qty || null, unit: row.unit || "",
+            unit_price: row.unitPrice || null, amount: row.amount || null}))};
+        state.candidate = copy(state.fields); renderEditor(); state.parseBaseline = JSON.stringify(collectFields());
+        sourceStatus(`讀到 ${state.fields.rows.length} 筆；請逐欄核對，尚未保存。`);
+      } else {
+        state.matrix = await readXlsx(file);
+        renderMapping(); sourceStatus(`讀到 ${state.matrix.length - 1} 列；先選欄位對照，尚未保存。`);
+      }
+    } catch (error) {
+      sourceStatus(`${parseMessage(error.message)}。原檔和人工修改仍保留，可逐欄填寫後一起保存。`, true);
     }
-  } catch (error) {
-    sourceStatus(`${parseMessage(error.message)}。原檔和人工修改仍保留，可逐欄填寫後一起保存。`, true);
-  } finally {state.busy = false; $("parse-file").disabled = !state.file;}
+  });
 }
 const mapKeys = ["company", "number", "date", "currency", ...rowKeys];
 function renderMapping() {
@@ -304,42 +309,49 @@ async function filePayload(file) {
   return {base64: btoa(binary), sha256};
 }
 async function saveDocument(approved = false) {
-  if (state.busy) return;
+  if (activity.busy) return;
   const confirmed = collectFields(); const invalid = localValidate(confirmed);
   if (invalid) return status(invalid, true);
-  state.busy = true; $("save-document").disabled = true;
-  try {
-    const sourceFile = state.selected ? null : await filePayload(state.file);
-    const matches = duplicates(confirmed, sourceFile?.sha256);
-    const approval = JSON.stringify({kind: state.kind, selectedId: state.selected?.id,
-      confirmed, fileSha: sourceFile?.sha256 || state.selected?.file_sha256 || null,
-      duplicateIds: matches.map(match => match.doc.id)});
-    if (matches.length && (!approved || state.duplicateApproval !== approval)) {
-      state.duplicateApproval = approval;
-      $("duplicate-review-text").textContent = `找到疑似重複試用文件：${duplicateText(matches)}。請核對後決定是否仍要另外保存。`;
-      $("duplicate-review").hidden = false;
-      status("尚未送出；請核對疑似重複文件。", true);
-      return;
+  const selected = state.selected && {id: state.selected.id, revision: state.selected.revision,
+    file_sha256: state.selected.file_sha256};
+  const draft = {kind: state.kind, source: state.source, candidate: copy(state.candidate),
+    file: state.file, requestKey: state.requestKey};
+  await activity.run(async () => {
+    status("正在核對本機原檔；尚未送出。");
+    try {
+      const sourceFile = selected ? null : await filePayload(draft.file);
+      const matches = suspectedDuplicates(state.documents, selected?.id, draft.kind, confirmed,
+        sourceFile?.sha256 || selected?.file_sha256);
+      const approval = JSON.stringify({kind: draft.kind, selectedId: selected?.id,
+        confirmed, fileSha: sourceFile?.sha256 || selected?.file_sha256 || null,
+        duplicateIds: matches.map(match => match.doc.id)});
+      if (matches.length && (!approved || state.duplicateApproval !== approval)) {
+        state.duplicateApproval = approval;
+        $("duplicate-review-text").textContent = `找到疑似重複試用文件：${duplicateText(matches)}。請核對後決定是否仍要另外保存。`;
+        $("duplicate-review").hidden = false;
+        status("尚未送出；請核對疑似重複文件。", true);
+        return;
+      }
+      clearDuplicateReview();
+      status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
+      let saved;
+      if (selected) saved = await api(`integration/documents/${selected.id}`, "PUT",
+        {revision: selected.revision, confirmed});
+      else saved = await api("integration/documents", "POST", {request_key: draft.requestKey,
+        kind: draft.kind, source: draft.source, candidate: draft.candidate,
+        confirmed, file: sourceFile}, 45000);
+      state.selected = saved; state.file = null; state.fileSha = saved.file_sha256;
+      state.fields = copy(saved.confirmed);
+      state.candidate = saved.candidate; state.kind = saved.kind; state.source = saved.source;
+      state.requestKey = crypto.randomUUID(); $("reload-document").hidden = true;
+      renderEditor(); rememberBaseline(); status(`已保存；修訂 ${saved.revision}。`);
+      try {await refresh();}
+      catch {status(`已保存修訂 ${saved.revision}，但列表未能刷新；可重新載入查看。`, true);}
+    } catch (error) {
+      if (error.code === "TRIAL_VERSION_CONFLICT") $("reload-document").hidden = false;
+      status(`保存失敗：${codeMessage(error.code)}${error.unknown ? "；結果未知，請用同一請求重試或重新載入查核。" : ""}`, true);
     }
-    clearDuplicateReview();
-    status("正在保存人工確認欄位；原檔此時才會送至網站主機。");
-    let saved;
-    if (state.selected) saved = await api(`integration/documents/${state.selected.id}`, "PUT",
-      {revision: state.selected.revision, confirmed});
-    else saved = await api("integration/documents", "POST", {request_key: state.requestKey,
-      kind: state.kind, source: state.source, candidate: state.candidate,
-      confirmed, file: sourceFile}, 45000);
-    state.selected = saved; state.file = null; state.fileSha = saved.file_sha256;
-    state.fields = copy(saved.confirmed);
-    state.candidate = saved.candidate; state.kind = saved.kind; state.source = saved.source;
-    state.requestKey = crypto.randomUUID(); $("reload-document").hidden = true;
-    renderEditor(); rememberBaseline(); status(`已保存；修訂 ${saved.revision}。`);
-    try {await refresh();}
-    catch {status(`已保存修訂 ${saved.revision}，但列表未能刷新；可重新載入查看。`, true);}
-  } catch (error) {
-    if (error.code === "TRIAL_VERSION_CONFLICT") $("reload-document").hidden = false;
-    status(`保存失敗：${codeMessage(error.code)}${error.unknown ? "；結果未知，請用同一請求重試或重新載入查核。" : ""}`, true);
-  } finally {state.busy = false; $("save-document").disabled = false;}
+  });
 }
 function openDocument(saved, force = false) {
   if (!saved) return;
@@ -493,22 +505,27 @@ function openProduct(product, force = false) {
   renderAliasRows(); rememberProductBaseline(); $("product-mode").scrollIntoView({block: "start"});
 }
 async function saveProduct() {
+  if (activity.busy) return;
   const draft = productDraft();
   if (!draft.label || !draft.aliases.length || draft.aliases.some(alias => !alias.company || !alias.code))
     return status("請填主檔描述與每組公司、品號；空白別名可先移除。", true);
-  const current = state.selectedProduct;
-  try {
-    const saved = current ? await api(`integration/products/${current.id}`, "PUT",
-      {revision: current.revision, ...draft}) : await api("integration/products", "POST", draft);
-    state.selectedProduct = saved; state.productAliases = copy(saved.aliases);
-    $("product-mode").textContent = `編修主檔；修訂 ${saved.revision}`;
-    $("save-product").textContent = "保存主檔修訂"; $("reload-product").hidden = true;
-    renderAliasRows(); rememberProductBaseline(); status("主檔已保存；原文件欄位未改動。");
-  } catch (error) {
-    if (error.code === "TRIAL_PRODUCT_VERSION_CONFLICT") $("reload-product").hidden = false;
-    return status(`主檔保存失敗：${codeMessage(error.code)}`, true);
-  }
-  try {await refresh();} catch {status("主檔已保存，但列表未能刷新；可重新載入。", true);}
+  const current = state.selectedProduct && {id: state.selectedProduct.id,
+    revision: state.selectedProduct.revision};
+  await activity.run(async () => {
+    status("正在保存主檔修訂。");
+    try {
+      const saved = current ? await api(`integration/products/${current.id}`, "PUT",
+        {revision: current.revision, ...draft}) : await api("integration/products", "POST", draft);
+      state.selectedProduct = saved; state.productAliases = copy(saved.aliases);
+      $("product-mode").textContent = `編修主檔；修訂 ${saved.revision}`;
+      $("save-product").textContent = "保存主檔修訂"; $("reload-product").hidden = true;
+      renderAliasRows(); rememberProductBaseline(); status("主檔已保存；原文件欄位未改動。");
+      try {await refresh();} catch {status("主檔已保存，但列表未能刷新；可重新載入。", true);}
+    } catch (error) {
+      if (error.code === "TRIAL_PRODUCT_VERSION_CONFLICT") $("reload-product").hidden = false;
+      status(`主檔保存失敗：${codeMessage(error.code)}${error.unknown ? "；結果未知，請先重新載入查核，不要直接重試。" : ""}`, true);
+    }
+  });
 }
 async function exportCsv() {
   try {const response = await fetch(`${apiRoot}export.csv?${queryString()}`,
@@ -567,7 +584,7 @@ $("reload-product").addEventListener("click", async () => {
     status("已載入最新版主檔；先前未存修改已放棄。");
   } catch (error) {status(`重載主檔失敗：${codeMessage(error.code)}`, true);}
 });
-window.addEventListener("beforeunload", event => {if (hasUnsaved() || productHasUnsaved()) {
+window.addEventListener("beforeunload", event => {if (activity.busy || hasUnsaved() || productHasUnsaved()) {
   event.preventDefault(); event.returnValue = "";
 }});
 newDocument(true); newProduct(true); refresh().catch(error => {$("login-section").hidden = false;

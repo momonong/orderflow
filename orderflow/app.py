@@ -1234,6 +1234,7 @@ class Handler(BaseHTTPRequestHandler):
             PREFIX + "integration-xlsx.mjs": ("integration-xlsx.mjs", "text/javascript"),
             PREFIX + "integration-comparison.mjs": ("integration-comparison.mjs", "text/javascript"),
             PREFIX + "integration-duplicates.mjs": ("integration-duplicates.mjs", "text/javascript"),
+            PREFIX + "integration-activity.mjs": ("integration-activity.mjs", "text/javascript"),
         }
         if path == PREFIX + "integration":
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)

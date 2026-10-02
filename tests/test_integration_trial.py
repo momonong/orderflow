@@ -236,6 +236,8 @@ class TrialApiTests(unittest.TestCase):
         self.assertEqual(code, 200)
         code, _, _ = self.request("GET", "/orderflow/integration-duplicates.mjs")
         self.assertEqual(code, 200)
+        code, _, _ = self.request("GET", "/orderflow/integration-activity.mjs")
+        self.assertEqual(code, 200)
         code, result, _ = self.request("GET", "/orderflow/api/integration/bootstrap")
         self.assertEqual((code, result["error_code"]), (401, "AUTH_REQUIRED"))
         owner, other = self.login(), self.login()
