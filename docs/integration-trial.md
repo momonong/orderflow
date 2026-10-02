@@ -1,6 +1,6 @@
 # 整合測試（新版）：文件與品項帳冊
 
-本階段在既有 OrderFlow 應用內增設獨立試用介面與資料命名空間。它供合成資料驗證，保留 `/orderflow/` 管理頁及 `/orderflow/test/` 診斷頁；本階段不推送、合併或部署。
+本階段在既有 OrderFlow 應用內增設獨立試用介面與資料命名空間。它供合成資料驗證，保留 `/orderflow/` 管理頁及 `/orderflow/test/` 診斷頁。以下先記錄本機建構與驗證契約；正式部署條件見 [ASUS 整合試用升級準備](integration-trial-deployment.md)。
 
 ## 已確認的工作與界線
 
