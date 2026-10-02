@@ -24,6 +24,7 @@ ROUTES = {
     "bootstrap", "management_bootstrap", "documents", "management_documents",
     "jobs", "management_jobs", "job_get", "management_job_get", "local_sources",
     "record_sets", "drafts", "key_check", "echo", "sample", "diagnostics", "other_api",
+    "integration",
 }
 CLIENT_CODES = {
     "NONE", "HTTP_ERROR", "BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIMEOUT",
