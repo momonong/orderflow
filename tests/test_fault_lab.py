@@ -26,6 +26,17 @@ class FaultLabTests(unittest.TestCase):
                    if item["route"].startswith("/orderflow/api/jobs/")]
         self.assertEqual([item["status"] for item in queries], [None, 200])
 
+    def test_delay_crosses_client_timeout_and_records_finished_proxy_fault(self):
+        with Lab("post_delay") as lab:
+            report = exercise(lab)
+        self.assertTrue(report["verdict"]["scenario_expectation_met"])
+        post = next(item for item in report["script_observations"]
+                    if item["route"] == "/orderflow/api/jobs")
+        self.assertEqual(post["error"], "TimeoutError")
+        injected = [item for item in report["injection_truth"]["proxy_events"]
+                    if item["injection"] == "post_delay"]
+        self.assertEqual(len(injected), 1)
+
     def test_proxy_preserves_application_csrf_guard_and_rejects_foreign_sites(self):
         with Lab("normal") as lab:
             client = Client(lab)

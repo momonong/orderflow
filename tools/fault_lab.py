@@ -507,7 +507,16 @@ def exercise(lab: Lab) -> dict:
                                      "result_readable": isinstance(query["value"], dict) and
                                      isinstance(query["value"].get("result"), list)})
     if lab.scenario == "post_delay":
-        time.sleep(1)
+        # The client times out at five seconds; the proxy finishes its delayed
+        # write after six.  Wait for that actual event instead of racing a
+        # one-second sleep before snapshotting the injection truth.
+        event_deadline = time.monotonic() + 3
+        while time.monotonic() < event_deadline:
+            with lab.proxy.lock:
+                recorded = any(event["injection"] == "post_delay" for event in lab.proxy.events)
+            if recorded:
+                break
+            time.sleep(0.02)
     with lab.proxy.lock:
         proxy_events = list(lab.proxy.events)
         trigger_count = lab.proxy.trigger_count
