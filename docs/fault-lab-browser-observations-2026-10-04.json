@@ -1,0 +1,46 @@
+{
+  "browser_check_id": "browser-check-2026-10-04-01",
+  "environment": "Codex in-app browser against local 127.0.0.1 fault lab",
+  "app_version": "0.3.0",
+  "lab_run_id": null,
+  "lab_run_id_note": "The serve command did not print its internal run_id during these two runs; later versions print it.",
+  "scenarios": [
+    {
+      "scenario_id": "receipt_lost_after_commit",
+      "lab_port": 33113,
+      "observations": [
+        "The real diagnostic page loaded with a visible local fake-Google banner.",
+        "Connection check passed and a 431-byte synthetic PDF uploaded through the browser.",
+        "Recognition POST lost its receipt; the page said it could not confirm whether the job started and warned against immediate retry.",
+        "The diagnostic textarea recorded AI recognition as unknown with NETWORK_ERROR and a jobs request_id.",
+        "After reload, the same job ID c00f6835-8c1b-45ba-9784-a2384b0388ee and the synthetic result row were visible."
+      ],
+      "read_only_db_check": {
+        "document_count": 1,
+        "job_count": 1,
+        "job_id": "c00f6835-8c1b-45ba-9784-a2384b0388ee",
+        "state": "done",
+        "result_saved": true
+      },
+      "copy_button_status": "The page displayed report copied.",
+      "clipboard_contents_independently_verified": false
+    },
+    {
+      "scenario_id": "diagnostics_blocked",
+      "lab_port": 35055,
+      "observations": [
+        "The page and connection check worked while the diagnostic POST fault was active.",
+        "The copy button displayed report copied and the diagnostic textarea contained 2294 characters with a trace ID.",
+        "The manual report disclosure opened and showed a selectable textarea.",
+        "After browser activity, an unauthenticated diagnostic POST reached the backend and returned 401; this indicates the one-shot proxy block had already been consumed."
+      ],
+      "proxy_trigger_source": "inferred from the only preceding browser activity; the live proxy counter was not exported",
+      "clipboard_contents_independently_verified": false
+    }
+  ],
+  "limits": [
+    "All data and HTTP services were synthetic and loopback-only; no real Google call or company-network test occurred.",
+    "The browser UI status did not establish the system clipboard contents.",
+    "The browser observations do not replace the per-scenario script reports for exact injection truth."
+  ]
+}
