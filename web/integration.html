@@ -8,16 +8,16 @@
   <script type="module" src="/orderflow/integration.js"></script>
 </head>
 <body>
-<header><a href="/orderflow/">← 原管理頁</a><a href="/orderflow/test/">診斷測試</a><h1>整合測試（新版）</h1><span>合成資料試用</span></header>
+<header><a href="/orderflow/">← 原管理頁</a><a href="/orderflow/test/">診斷測試</a><a href="/orderflow/help/">圖文使用說明</a><h1>整合測試（新版）</h1><span>合成資料試用</span></header>
 <main>
-  <p class="notice">採購單與發票在此僅是文件紀錄；數量對照不代表出貨、庫存或收款。此試用資料只屬於目前瀏覽器會話；清除 cookie 或換裝置後無法保證找回。</p>
+  <p class="notice">採購單與發票在此僅是文件紀錄；數量對照不代表出貨、庫存或收款。保存的試用紀錄只屬於目前瀏覽器會話；明確加入共用清單的 PDF 可供其他登入者選用。清除 cookie 或換裝置後無法保證找回私人試用紀錄。</p>
   <section id="login-section" class="card" hidden>
     <h2>登入網站</h2><form id="login-form"><label>網站密碼 <input id="password" type="password" autocomplete="current-password" required></label><button>登入</button></form>
   </section>
   <div id="workspace" hidden>
     <section class="card">
       <h2>新增或核對文件</h2>
-      <p>選檔與解析只在此瀏覽器進行；按「確認並保存」後，原檔與人工確認欄位才上傳至網站主機。本頁尚未整合 Google 辨識，不執行 AI 或 OCR。原管理頁保留原有辨識功能。</p>
+      <p>本機選檔與解析只在此瀏覽器進行；共用 PDF 是從網站主機取入瀏覽器。按「確認並保存」後，原檔與人工確認欄位才作為此會話的新試用紀錄送至網站主機。本頁尚未整合 Google 辨識，不執行 AI 或 OCR。原管理頁保留原有辨識功能。</p>
       <div class="grid"><label>文件種類 <select id="kind"><option value="purchase_order">採購單</option><option value="invoice">發票</option></select></label>
       <label>來源 <select id="source"><option value="manual">人工輸入</option><option value="pdf">PDF</option><option value="xlsx">Excel .xlsx</option></select></label>
       <label>原檔 <input id="source-file" type="file" accept=".pdf,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled></label></div>
@@ -38,6 +38,12 @@
         </div>
         <div class="actions"><button id="save-document" type="button">確認並保存</button><button id="reload-document" type="button" hidden>放棄本次修改並載入最新版</button></div>
       </div>
+    </section>
+    <section class="card"><h2>共用試用 PDF</h2>
+      <p>只有原上傳者明確加入清單的 PDF 會出現在這裡。選用後只在此瀏覽器建立待確認的新文件；請逐欄核對，再按「確認並保存」。不會自動呼叫 Google。取消共用後不能再選用，但已保存的副本仍保留。</p>
+      <label for="shared-kind">來源未分類時，選用為 <select id="shared-kind"><option value="">請先選文件種類</option><option value="purchase_order">採購單</option><option value="invoice">發票</option></select></label>
+      <button id="shared-refresh" type="button">更新共用清單</button>
+      <p id="shared-status" role="status"></p><div id="shared-list"></div>
     </section>
     <section class="card"><h2>試用文件與查詢</h2>
       <div class="grid"><label>公司 <input id="search-company"></label><label>單號 <input id="search-number"></label><label>品號 <input id="search-code"></label><label>日期 <input id="search-date" placeholder="YYYY-MM-DD"></label></div>

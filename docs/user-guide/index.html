@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>OrderFlow 圖解使用說明</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif;color:#20243a;background:#f5f7fb;line-height:1.65}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0}a{color:#174da6;text-underline-offset:3px}a:focus-visible{outline:3px solid #e9ad30;outline-offset:3px;border-radius:3px}
+    .top{background:#fff;border-bottom:1px solid #dfe5ef}.top-inner{max-width:1100px;margin:auto;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:14px}.brand{font-weight:800;color:#1f2c48;text-decoration:none}.brand span{color:#1c5ec7}.top small{color:#617087}
+    .wrap{max-width:1100px;margin:auto;padding:0 22px 70px}.hero{padding:54px 0 28px}.eyebrow{font-size:.79rem;font-weight:800;letter-spacing:.11em;color:#1c5ec7;text-transform:uppercase;margin:0 0 10px}.hero h1{font-size:clamp(2rem,5vw,3.4rem);line-height:1.18;margin:0 0 14px;letter-spacing:-.04em}.lead{font-size:1.12rem;color:#485570;max-width:760px;margin:0 0 20px}.pill{display:inline-block;border-radius:99px;background:#e7efff;color:#174da6;font-size:.84rem;font-weight:750;padding:5px 12px;margin:0 8px 8px 0}.pill.light{background:#edf6ee;color:#25613a}
+    .jump{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.jump a,.buttonlink{display:inline-block;background:#1c5ec7;color:#fff;text-decoration:none;border-radius:11px;padding:10px 16px;font-weight:750}.jump a.secondary,.buttonlink.secondary{background:#fff;color:#174da6;border:1px solid #bacbe8}.jump a:hover,.buttonlink:hover{filter:brightness(.94)}
+    section{scroll-margin-top:22px}.section{margin-top:46px}.section h2{font-size:clamp(1.5rem,3vw,2.1rem);line-height:1.25;margin:0 0 8px}.section-intro{color:#53617a;max-width:750px;margin:0 0 20px}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px}.card,.step,.note,.figure{background:#fff;border:1px solid #e0e6f0;border-radius:18px;box-shadow:0 7px 24px rgba(25,48,89,.05)}.card{padding:22px;display:flex;flex-direction:column;gap:8px}.card .icon{font-size:1.75rem}.card h3{margin:0;font-size:1.16rem}.card p{margin:0;color:#4e5d76}.card a{margin-top:auto;font-weight:750}.card.main{border-color:#9db9ec;background:#fafdff}
+    .choice{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}.choice .card{border-top:5px solid #3673d3}.choice .card.local{border-top-color:#2c8f63}.tag{display:inline-block;font-size:.76rem;font-weight:800;padding:3px 9px;border-radius:7px;background:#e7efff;color:#174da6;align-self:flex-start}.local .tag{background:#e6f5ec;color:#217249}
+    .steps{display:grid;gap:15px}.step{padding:23px}.step-head{display:flex;align-items:flex-start;gap:12px}.number{flex:0 0 34px;height:34px;display:grid;place-items:center;border-radius:11px;background:#1c5ec7;color:#fff;font-weight:800}.step h3{margin:0;font-size:1.15rem}.step p{margin:5px 0 0;color:#45536d}.step .detail{margin:13px 0 0 46px}.step ul{margin:8px 0 0;padding-left:22px}.step li{margin:4px 0}
+    figure{margin:18px 0 0}.figure{padding:16px;background:#fdfefe}.figure svg{width:100%;height:auto;display:block;border-radius:12px;background:#f6f8fc}.figure figcaption{font-size:.88rem;color:#5a6980;margin:10px 2px 0}.figure svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif}.figure svg .frame{fill:#fff;stroke:#d5deeb;stroke-width:2}.figure svg .soft{fill:#eef3fb}.figure svg .action{fill:#1c5ec7}.figure svg .hint{fill:#fff3d1;stroke:#e5b749;stroke-width:2}.figure svg .success{fill:#e6f5ec;stroke:#77b391;stroke-width:2}.figure svg .label{fill:#24334e;font-size:17px;font-weight:700}.figure svg .small{fill:#4f607b;font-size:14px}.figure svg .buttontext{fill:#fff;font-size:16px;font-weight:750}.figure svg .num{fill:#945909;font-size:19px;font-weight:900}
+    .two{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;align-items:start}.note{padding:19px 21px;border-left:5px solid #e3ac36;background:#fffdf7}.note.green{border-color:#398f61;background:#f7fff9}.note strong{color:#29354b}.note p{margin:5px 0 0}.statusflow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0}.statusflow>div{padding:16px;border-radius:12px;background:#fff;border:1px solid #dfe6f2}.statusflow b{display:block}.statusflow span{display:block;color:#52617a;font-size:.93rem}.statusflow .done{border-color:#8cb99e;background:#f6fcf7}.micro{font-size:.88rem;color:#5b6880}.checklist{list-style:none;margin:0;padding:0}.checklist li{padding:10px 0;border-bottom:1px solid #e6ebf3}.checklist li:last-child{border:0}.checklist li:before{content:"✓";color:#217249;font-weight:900;margin-right:10px}.warning{background:#fff5e6;border:1px solid #edcd92;border-radius:15px;padding:16px 19px;margin-top:18px}.warning strong{color:#814508}.footer{border-top:1px solid #dfe5ef;margin-top:50px;padding-top:24px;color:#59677d;font-size:.9rem}.footer p{margin:5px 0}
+    @media(max-width:760px){.top-inner{padding:12px 16px}.wrap{padding:0 16px 55px}.hero{padding:34px 0 18px}.cards,.choice,.two{grid-template-columns:1fr}.card,.step{padding:19px}.section{margin-top:38px}.statusflow{grid-template-columns:1fr}.step .detail{margin-left:0}.jump a{flex:1 1 auto;text-align:center}.figure{padding:8px;overflow-x:auto}.figure:before{content:"圖可左右滑動看完整內容";display:block;color:#5a6980;font-size:.82rem;padding:2px 6px 8px}.figure svg{width:440px;max-width:none}.figure figcaption{padding:0 6px}}
+    @media print{html{scroll-behavior:auto}body{background:#fff}.top,.jump,.buttonlink{display:none}.wrap{max-width:none;padding:0}.card,.step,.figure,.note{box-shadow:none;break-inside:avoid}.section{break-before:auto}.footer{margin-top:20px}}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="top-inner"><a class="brand" href="#top">Order<span>Flow</span> · 圖解使用說明</a><small>可離線閱讀 · 系統操作仍需連網</small></div></header>
+  <main id="top" class="wrap">
+    <div class="hero">
+      <p class="eyebrow">給第一次使用的人</p>
+      <h1>照圖操作，先核對，再保存。</h1>
+      <p class="lead">這份說明帶你從登入、讀取採購單或發票，到確認資料已保存；遇到問題時，也告訴你該按哪個回報按鈕。</p>
+      <span class="pill">所有圖片均為介面示意，使用虛構資料</span><span class="pill light">網站密碼與 Google 金鑰是兩回事</span>
+      <nav class="jump" aria-label="本頁目錄"><a href="#start">先選要用哪一頁</a><a class="secondary" href="#daily">日常操作</a><a class="secondary" href="#new">新版試用</a><a class="secondary" href="#help">遇到問題</a></nav>
+    </div>
+
+    <section id="start" class="section" aria-labelledby="start-title">
+      <h2 id="start-title">先選對頁面</h2>
+      <p class="section-intro">平常記錄採購單與發票，先到「原管理頁」。新版是獨立試用；連線測試只在需要排查問題時使用。</p>
+      <div class="cards">
+        <article class="card main"><div class="icon" aria-hidden="true">📋</div><h3>原管理頁</h3><p>平常用這頁。可選科雅採購憑單本機解析，或使用 Google AI 辨識採購單／發票；核對後保存到對應列表。</p><a href="https://momonong.me/orderflow/">開啟原管理頁 ↗</a></article>
+        <article class="card"><div class="icon" aria-hidden="true">🧩</div><h3>整合測試（新版）</h3><p>用示範資料試人工輸入、瀏覽器解析與對照。它和原管理頁資料分開，尚未整合 Google 辨識。</p><a href="https://momonong.me/orderflow/integration/">開啟新版試用 ↗</a></article>
+        <article class="card"><div class="icon" aria-hidden="true">🛟</div><h3>連線測試（診斷測試）</h3><p>出問題時檢查連線、上傳測試 PDF，或複製測試報告。不要用含客戶資料的文件做測試。</p><a href="https://momonong.me/orderflow/test/">開啟診斷測試 ↗</a></article>
+      </div>
+    </section>
+
+    <section id="daily" class="section" aria-labelledby="daily-title">
+      <h2 id="daily-title">日常操作：原管理頁</h2>
+      <p class="section-intro">先登入，再到「📤 PDF 上傳」。到了上傳頁，依文件選其中一種讀取方式。</p>
+      <div class="step"><div class="step-head"><span class="number">1</span><div><h3>用網站密碼登入</h3><p>開啟原管理頁，在「網站密碼」填入提供連結的人給你的密碼，按「登入」。如果已看到儀表板，就直接做下一步。</p></div></div>
+        <figure class="figure"><svg viewBox="0 0 480 245" role="img" aria-labelledby="login-fig-title"><title id="login-fig-title">示意：網站登入畫面，網站密碼欄位與登入按鈕分別標為一、二</title><rect class="frame" x="7" y="7" width="466" height="231" rx="15"/><rect class="soft" x="7" y="7" width="466" height="42" rx="15"/><text class="label" x="25" y="35">物流管理  AI</text><rect class="frame" x="82" y="68" width="316" height="148" rx="14"/><text class="label" x="105" y="100">登入網站</text><text class="small" x="105" y="128">網站密碼</text><rect class="hint" x="105" y="138" width="184" height="35" rx="7"/><text class="small" x="116" y="161">••••••••</text><circle class="hint" cx="313" cy="155" r="18"/><text class="num" x="307" y="162">1</text><rect class="action" x="105" y="183" width="94" height="27" rx="7"/><text class="buttontext" x="135" y="202">登入</text><circle class="hint" cx="220" cy="196" r="18"/><text class="num" x="214" y="203">2</text></svg><figcaption>介面示意：① 填網站密碼 → ② 按「登入」。不要把 Google API key 填在這裡。</figcaption></figure>
+      </div>
+      <div class="step"><div class="step-head"><span class="number">2</span><div><h3>按「📤 PDF 上傳」，選讀取方式</h3><p>同一頁有兩條路。先看手上的文件是哪一種，不需要兩種都做。</p></div></div>
+        <div class="detail choice">
+          <div class="card local"><span class="tag">不用 Google 金鑰</span><h3>科雅採購憑單</h3><p>只限<strong>單頁、有文字層</strong>的科雅採購憑單 PDF：約 8 MB 以內（上限 8 MiB）。「有文字層」就是能用滑鼠選取 PDF 內的文字；純照片或掃描圖不行。按「選擇採購憑單 PDF」，再按「在瀏覽器解析」。</p></div>
+          <div class="card"><span class="tag">會送交 Google</span><h3>其他採購單或發票</h3><p>PDF 約 8 MB 以內（上限 8 MiB）。先在「Google AI 金鑰」貼入金鑰並按「套用金鑰」，再選「採購單 PDF」或「發票 PDF」。選檔後會開始上傳。</p></div>
+        </div>
+        <figure class="figure"><svg viewBox="0 0 480 300" role="img" aria-labelledby="choice-fig-title"><title id="choice-fig-title">示意：原管理頁 PDF 上傳頁的本機解析、Google 金鑰與 AI 自動分析位置</title><rect class="frame" x="7" y="7" width="466" height="286" rx="14"/><rect class="soft" x="7" y="7" width="112" height="286" rx="14"/><text class="small" x="20" y="45">📊 儀表板</text><rect class="hint" x="14" y="64" width="98" height="35" rx="7"/><text class="label" x="19" y="88" style="font-size:14px">PDF 上傳</text><text class="label" x="140" y="38">PDF 上傳</text><rect class="success" x="136" y="53" width="323" height="77" rx="10"/><text class="label" x="150" y="78">本機解析（不使用 AI）</text><text class="small" x="150" y="106">選檔 → 在瀏覽器解析</text><circle class="hint" cx="437" cy="72" r="17"/><text class="num" x="431" y="79">1</text><rect class="frame" x="136" y="139" width="323" height="61" rx="10"/><text class="label" x="150" y="165">Google AI 金鑰</text><text class="small" x="150" y="188">API Key · 套用金鑰</text><circle class="hint" cx="437" cy="159" r="17"/><text class="num" x="431" y="166">2</text><rect class="frame" x="136" y="209" width="323" height="68" rx="10"/><text class="label" x="150" y="235">AI 自動分析</text><text class="small" x="150" y="260">採購單 PDF ／ 發票 PDF</text></svg><figcaption>介面示意：① 科雅格式走上方本機解析；其他 PDF 走 ② 金鑰＋下方「AI 自動分析」。</figcaption></figure>
+      </div>
+      <div class="step"><div class="step-head"><span class="number">3</span><div><h3>等讀取完成，再逐欄核對</h3><p>本機解析完成會看到「已讀到…筆」。Google 辨識則按「送交 Google AI 辨識」，在確認視窗同意後等待「辨識完成」。若選檔後顯示「上傳未確認」，先看文件列表，別急著重傳。</p></div></div>
+        <div class="detail note"><strong>最重要的一眼：</strong><p>「已讀到」或「辨識完成」只是待核對資料。檢查採購單號／發票號碼、客戶、品名、數量、單位、單價、金額、幣別及日期；不確定的欄位不要猜。</p></div>
+      </div>
+      <div class="step"><div class="step-head"><span class="number">4</span><div><h3>按「確認並儲存記錄」</h3><p>核對並修正後，按下方「確認並儲存記錄」。等待畫面顯示「已保存修訂…」或「PDF 與人工確認記錄已存於網站主機」，才算保存。正常採購單／發票是這個按鈕；舊的未分類草稿可能顯示「儲存草稿」。</p></div></div>
+        <figure class="figure"><svg viewBox="0 0 480 275" role="img" aria-labelledby="save-fig-title"><title id="save-fig-title">示意：核對並儲存區域，先檢查品項欄位再按確認並儲存記錄</title><rect class="frame" x="7" y="7" width="466" height="261" rx="14"/><text class="label" x="24" y="39">核對並儲存</text><rect class="hint" x="23" y="53" width="431" height="41" rx="8"/><text class="small" x="35" y="79">已讀到 1 筆；請核對，尚未儲存。</text><text class="small" x="25" y="123">品名</text><rect class="frame" x="24" y="131" width="205" height="33" rx="6"/><text class="small" x="35" y="153">示範品項</text><text class="small" x="250" y="123">數量</text><rect class="frame" x="248" y="131" width="100" height="33" rx="6"/><text class="small" x="260" y="153">2</text><text class="small" x="25" y="195">再看單號、客戶、單位、金額、日期…</text><rect class="action" x="24" y="214" width="236" height="38" rx="8"/><text class="buttontext" x="40" y="239">確認並儲存記錄</text><circle class="hint" cx="284" cy="232" r="19"/><text class="num" x="278" y="239">4</text></svg><figcaption>介面示意，資料為虛構：先改錯的欄位，再按 ④「確認並儲存記錄」。按下後仍要等成功訊息。</figcaption></figure>
+        <div class="detail statusflow" aria-label="讀取、核對與保存的差別"><div><b>① 已讀到／辨識完成</b><span>系統提出候選資料。</span></div><div><b>② 還在核對</b><span>修改尚未成為正式記錄。</span></div><div class="done"><b>③ 已保存修訂</b><span>畫面確認保存後，再到列表找回。</span></div></div>
+      </div>
+      <div class="step"><div class="step-head"><span class="number">5</span><div><h3>到列表找回，必要時匯出</h3><p>採購單按左側「📋 訂單」；發票按「🧾 發票紀錄」。可用搜尋欄找客戶或品名。需要檔案時，按頁面上方的「CSV 匯出」，再妥善保管下載檔。</p></div></div>
+        <figure class="figure"><svg viewBox="0 0 480 219" role="img" aria-labelledby="list-fig-title"><title id="list-fig-title">示意：原管理頁訂單與發票列表，以及上方 CSV 匯出按鈕</title><rect class="frame" x="7" y="7" width="466" height="205" rx="14"/><rect class="soft" x="7" y="7" width="466" height="43" rx="14"/><text class="label" x="22" y="35">物流管理</text><rect class="hint" x="350" y="15" width="101" height="29" rx="7"/><text class="small" x="363" y="35">CSV 匯出</text><rect class="soft" x="7" y="50" width="126" height="162"/><text class="small" x="19" y="87">📋 訂單</text><text class="small" x="19" y="120">🧾 發票紀錄</text><text class="label" x="153" y="83">訂單管理</text><rect class="frame" x="150" y="97" width="287" height="34" rx="6"/><text class="small" x="162" y="120">客戶／品名搜尋</text><rect class="success" x="150" y="145" width="287" height="44" rx="7"/><text class="small" x="162" y="172">PO-DEMO-01 · 示範品項 · 確認中</text></svg><figcaption>介面示意，資料為虛構：列表能找回已保存的記錄；上方可匯出 CSV。</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="new" class="section" aria-labelledby="new-title">
+      <h2 id="new-title">想試新版？資料與原頁分開</h2>
+      <p class="section-intro">「整合測試（新版）」適合用示範資料練習文件登錄與品項對照。目前沒有 Google 辨識，也不是完整正式物流系統。</p>
+      <div class="note green"><strong>與家人共用試用 PDF：</strong>先在原管理頁或診斷測試頁，選自己已上傳的 PDF，填入不含個資的名稱。原管理頁按「將我的文件加入共用試用清單」；診斷頁按「將目前文件加入共用清單」。其他登入者可在三個頁面的共用清單選用；新版只接受不超過 6 MiB 的 PDF，選用後會先把原檔放到瀏覽器，仍需逐欄核對並按「確認並保存」。選用不會自動呼叫 Google。未加入清單的文件仍只屬於原會話。取消共用後無法再新取用，已取得的副本仍保留；共用副本不能再分享。整合試用頁自行上傳的 PDF 目前不能加入共用清單。</div>
+      <div class="two"><div class="step"><div class="step-head"><span class="number">1</span><div><h3>選文件種類與來源</h3><p>選「採購單」或「發票」，再選「人工輸入」、「PDF」或「Excel .xlsx」。人工輸入按「新建空白品項」；檔案來源先選原檔，再按「在瀏覽器解析」。</p></div></div><div class="detail"><p><strong>格式有限：</strong>PDF 約 6 MB 以內（上限 6 MiB）；Excel 約 2 MB 以內（上限 2 MiB）。不是每份 PDF 都讀得出來，遇到無法解析時可改為人工輸入。</p><details><summary>選 Excel 後看到「Excel 欄位對照」怎麼做？</summary><p>把公司、單號、品名、數量等欄位選對，再按「預覽對照結果」；看過預覽後，仍要逐欄核對並保存。</p></details></div></div><div class="step"><div class="step-head"><span class="number">2</span><div><h3>逐欄核對後按「確認並保存」</h3><p>在「逐欄核對」改好公司、單號、日期、幣別與品項；按「確認並保存」。看到「已保存；修訂…」後，到「試用文件與查詢」按「查詢」找回。</p></div></div><div class="detail note"><strong>別把預覽當保存：</strong><p>選檔與解析時資料只在這個瀏覽器；按「確認並保存」後，原檔與人工確認欄位才送到網站主機。</p></div></div></div>
+      <figure class="figure"><svg viewBox="0 0 480 255" role="img" aria-labelledby="trial-fig-title"><title id="trial-fig-title">示意：新版試用頁的文件種類、來源、逐欄核對與確認並保存</title><rect class="frame" x="7" y="7" width="466" height="241" rx="14"/><text class="label" x="23" y="37">整合測試（新版）</text><rect class="frame" x="22" y="52" width="435" height="171" rx="10"/><text class="label" x="37" y="78">新增或核對文件</text><text class="small" x="37" y="105">文件種類：採購單</text><text class="small" x="37" y="130">來源：人工輸入／PDF／Excel</text><rect class="hint" x="36" y="141" width="407" height="34" rx="7"/><text class="small" x="48" y="164">逐欄核對：公司、單號、品項…</text><rect class="action" x="36" y="185" width="153" height="30" rx="7"/><text class="buttontext" x="51" y="206">確認並保存</text></svg><figcaption>介面示意：新版需自己按「確認並保存」，且與原管理頁分開。</figcaption></figure>
+    </section>
+
+    <section id="help" class="section" aria-labelledby="help-title">
+      <h2 id="help-title">遇到問題，照這樣回報</h2>
+      <p class="section-intro">先停在原畫面，看上面寫「正在處理」、「未確認」還是「失敗」。辨識結果不確定時，不要連續按送出，以免重複使用額度。</p>
+      <div class="steps">
+        <div class="step"><div class="step-head"><span class="number">1</span><div><h3>原管理頁有辨識錯誤</h3><p>在「辨識品項」按「複製此筆錯誤資訊」。若要回報整個頁面的狀況，往下到「遇到問題？」按「複製診斷資訊」。把複製的內容貼給提供連結的人。兩個按鈕用途不同。</p></div></div></div>
+        <div class="step"><div class="step-head"><span class="number">2</span><div><h3>正在做診斷測試</h3><p>在診斷測試頁按「複製測試報告」，貼給提供連結的人。請只用不含客戶或個資的測試 PDF。若無法自動複製，可展開「查看報告內容或手動複製」。</p></div></div></div>
+        <div class="step"><div class="step-head"><span class="number">3</span><div><h3>新版試用頁出錯</h3><p>截下畫面上的錯誤訊息、記下發生時間，再傳給提供連結的人。新版目前沒有前兩頁那種一鍵診斷報告。</p></div></div></div>
+        <div class="step"><div class="step-head"><span class="number">4</span><div><h3>整個網站都打不開</h3><p>截下瀏覽器的錯誤畫面，記下發生時間，再傳給提供連結的人。頁面都沒開出來時，就沒有頁內報告按鈕可按。</p></div></div></div>
+      </div>
+      <figure class="figure"><svg viewBox="0 0 480 290" role="img" aria-labelledby="help-fig-title"><title id="help-fig-title">示意：原管理頁有兩種複製按鈕，診斷測試頁有複製測試報告按鈕</title><rect class="frame" x="7" y="7" width="466" height="276" rx="14"/><text class="label" x="22" y="35">原管理頁 · 辨識品項</text><rect class="hint" x="22" y="49" width="435" height="55" rx="8"/><text class="small" x="35" y="72">這一筆辨識有錯 →</text><text class="label" x="35" y="95" style="font-size:16px">複製此筆錯誤資訊</text><text class="label" x="22" y="135">原管理頁 · 遇到問題？</text><rect class="hint" x="22" y="149" width="435" height="45" rx="8"/><text class="label" x="35" y="178" style="font-size:16px">複製診斷資訊</text><text class="label" x="22" y="222">診斷測試頁</text><rect class="success" x="22" y="235" width="435" height="37" rx="8"/><text class="label" x="35" y="260" style="font-size:16px">複製測試報告</text></svg><figcaption>介面示意：三個按鈕位於不同位置。新版試用頁沒有同樣的一鍵診斷報告。</figcaption></figure>
+      <div class="warning"><strong>複製成功也不代表提供網站的人已收到。</strong>請真的把內容貼到你們平常聯絡的管道；瀏覽器的問題回報也可能因連線而沒有完整送達網站主機。不要貼網站密碼、Google 金鑰或客戶文件。</div>
+    </section>
+
+    <section class="section" aria-labelledby="remember-title"><h2 id="remember-title">使用前記住這四件事</h2><div class="note green"><ul class="checklist"><li>盡量用同一個瀏覽器；換裝置或清除瀏覽器的網站資料（包含 cookie）後，不保證能看回原工作區資料。</li><li>採購單與發票是文件記錄。發票不等於已出貨，訂購／開票數量差也不是實體庫存。</li><li>Google 辨識會傳送 PDF 並可能使用 API 額度；只傳已獲准外傳的文件。</li><li>新版試用頁不是完整正式物流系統，資料也不會自動和原管理頁合併。</li></ul></div></section>
+    <footer class="footer"><p>OrderFlow 圖解說明 · 依目前頁面文案整理 · 2026-10-05</p><p>本檔可離線閱讀；連到 OrderFlow 的按鈕需網路。圖片全部標為「介面示意」，虛構欄位不是實際客戶資料。</p></footer>
+  </main>
+</body>
+</html>

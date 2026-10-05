@@ -1,11 +1,11 @@
 "use strict";
 // Page-local evidence only. Nothing here is an authorization or delivery receipt.
 window.OrderflowDiagnostics = (() => {
-  const buildId = "diag-20261002-01";
+  const buildId = "diag-20261005-01";
   const routes = new Set(["bootstrap", "management_bootstrap", "documents",
     "management_documents", "jobs", "management_jobs", "job_get",
     "management_job_get", "local_sources", "record_sets", "drafts",
-    "key_check", "echo", "sample", "diagnostics", "other_api"]);
+    "key_check", "echo", "sample", "diagnostics", "shared_documents", "other_api"]);
   const phases = new Set(["send", "http_received", "json_parsed", "marker_checked",
     "job_rendered", "request_unknown", "json_failed", "render_failed"]);
   const codes = new Set(["NONE", "HTTP_ERROR", "BAD_JSON_RESPONSE", "NETWORK_ERROR",
@@ -26,6 +26,8 @@ window.OrderflowDiagnostics = (() => {
     if (path.startsWith("management/record-sets/")) return "record_sets";
     if (path.startsWith("management/drafts/")) return "drafts";
     if (path.startsWith("jobs/")) return "job_get";
+    if (path.startsWith("shared-documents/")) return "shared_documents";
+    if (path === "shared-documents") return "shared_documents";
     return routes.has(path) ? path : "other_api";
   }
   function create(base) {

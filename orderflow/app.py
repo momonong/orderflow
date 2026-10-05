@@ -29,9 +29,10 @@ from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
 from .diagnostics import BUILD_ID, audit_event, client_report
 from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
+from .shared import SharedLibrary
 from .trial import TrialBook, valid_uuid as trial_uuid
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PREFIX = "/orderflow/"
 MAX_PDF_BYTES = 8 * 1024 * 1024
 MAX_JSON_BYTES = 4096
@@ -221,6 +222,9 @@ class Store:
                        "WHERE state IN ('queued', 'running')", (now_ms(),))
         self.db_path.chmod(0o600)
         self.trial = TrialBook(self, pdf_page_count)
+        self.shared = SharedLibrary(self, pdf_page_count, max_pdf_bytes=MAX_PDF_BYTES,
+                                    max_stored_bytes=MAX_STORED_BYTES,
+                                    max_documents_per_session=MAX_DOCUMENTS_PER_SESSION)
 
     @contextmanager
     def db(self) -> Iterator[sqlite3.Connection]:
@@ -305,8 +309,11 @@ class Store:
         if purpose not in PURPOSES:
             raise ValueError("invalid purpose")
         with self.db() as db:
-            rows = db.execute("SELECT id,size,sha256,created_ms,upload_ms,steps,page_count,document_kind "
-                              "FROM documents WHERE session_id=? AND purpose=? ORDER BY created_ms DESC",
+            rows = db.execute("SELECT d.id,d.size,d.sha256,d.created_ms,d.upload_ms,d.steps,"
+                              "d.page_count,d.document_kind,CASE WHEN EXISTS(SELECT 1 FROM "
+                              "shared_claims c WHERE c.document_id=d.id) THEN 'shared' ELSE 'upload' "
+                              "END AS source_type FROM documents d WHERE d.session_id=? AND d.purpose=? "
+                              "ORDER BY d.created_ms DESC",
                               (session_id, purpose)).fetchall()
         result = [dict(row) | {"steps": json.loads(row["steps"])} for row in rows]
         if purpose == "diagnostic":
@@ -360,7 +367,9 @@ class Store:
         stored_key = request_key if purpose == "diagnostic" else f"management:{request_key}"
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            fields = "id,size,sha256,created_ms,upload_ms,steps,page_count,document_kind"
+            fields = ("id,size,sha256,created_ms,upload_ms,steps,page_count,document_kind,"
+                      "CASE WHEN EXISTS(SELECT 1 FROM shared_claims c WHERE c.document_id=documents.id) "
+                      "THEN 'shared' ELSE 'upload' END AS source_type")
             existing = db.execute(f"SELECT {fields} FROM documents "
                                   "WHERE session_id=? AND request_key=? AND purpose=?",
                                   (session_id, stored_key, purpose)).fetchone()
@@ -438,7 +447,8 @@ class Store:
                 path.unlink(missing_ok=True)
                 raise
         result = {"id": doc_id, "size": len(data), "sha256": sha, "created_ms": timestamp,
-                  "upload_ms": elapsed, "steps": json.loads(steps), "page_count": page_count}
+                  "upload_ms": elapsed, "steps": json.loads(steps), "page_count": page_count,
+                  "source_type": "upload"}
         if purpose == "management":
             result.update(document_kind=document_kind, duplicate=False,
                           same_pdf_other_kind=same_pdf_other_kind)
@@ -1064,6 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
         tail = path[len(PREFIX + "api/"):]
         exact = {
             "bootstrap": "bootstrap", "management/bootstrap": "management_bootstrap",
+            "shared-documents": "shared_documents",
             "documents": "documents", "management/documents": "management_documents",
             "jobs": "jobs", "management/jobs": "management_jobs",
             "management/local-sources": "local_sources", "key/check": "key_check",
@@ -1073,6 +1084,8 @@ class Handler(BaseHTTPRequestHandler):
             return exact[tail]
         if tail.startswith("integration/"):
             return "integration"
+        if tail.startswith("shared-documents/"):
+            return "shared_documents"
         for prefix, label in (("jobs/", "job_get"),
                               ("management/jobs/", "management_job_get"),
                               ("management/record-sets/", "record_sets"),
@@ -1229,6 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
             PREFIX + "app.js": ("app.js", "text/javascript"),
             PREFIX + "style.css": ("style.css", "text/css"),
             PREFIX + "integration/": ("integration.html", "text/html"),
+            PREFIX + "help/": ("index.html", "text/html"),
             PREFIX + "integration.js": ("integration.js", "text/javascript"),
             PREFIX + "integration.css": ("integration.css", "text/css"),
             PREFIX + "integration-xlsx.mjs": ("integration-xlsx.mjs", "text/javascript"),
@@ -1248,9 +1262,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if path == PREFIX + "help":
+            self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+            self.send_header("Location", PREFIX + "help/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if path in static_routes:
             filename, content_type = static_routes[path]
-            data = (STATIC / filename).read_bytes()
+            source = ROOT / "docs/user-guide/index.html" if path == PREFIX + "help/" else STATIC / filename
+            data = source.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type + "; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -1265,6 +1286,40 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.json_response(200, {"status": "ok", "version": VERSION,
                                      "build_id": BUILD_ID, "mode": "mock-and-real"})
+            return
+        if path == PREFIX + "api/shared-documents":
+            session_id = self.get_session()
+            if session_id:
+                self.json_response(200, {"documents": self.server.store.shared.list(session_id)})
+            return
+        if path.startswith(PREFIX + "api/shared-documents/") and path.endswith("/file"):
+            session_id = self.get_session()
+            if not session_id:
+                return
+            share_id = path[len(PREFIX + "api/shared-documents/"):-len("/file")]
+            if not valid_uuid(share_id):
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            try:
+                data = self.server.store.shared.file(share_id)
+            except LookupError:
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            except ValueError:
+                self.error(409, "SHARED_FILE_UNAVAILABLE")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", 'inline; filename="shared-example.pdf"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+                self.audit_http("response_written", 200)
+            except OSError:
+                self.audit_http("response_write_unknown", 200)
             return
         if path == PREFIX + "api/bootstrap":
             session_id = self.get_session()
@@ -1498,6 +1553,56 @@ class Handler(BaseHTTPRequestHandler):
                             item["phase"], {**item, "source": "client"})
             self.json_response(200, {"status": "recorded"})
             return
+        if path == PREFIX + "api/shared-documents":
+            value = self.get_json(2048)
+            if value is None:
+                return
+            if set(value) != {"source_purpose", "document_id", "title"} or not valid_uuid(value["document_id"]):
+                self.error(400, "SHARED_REQUEST_INVALID")
+                return
+            try:
+                shared, created = self.server.store.shared.share(
+                    session_id, value["source_purpose"], value["document_id"], value["title"], now_ms)
+            except LookupError:
+                self.error(404, "SHARED_SOURCE_NOT_FOUND")
+                return
+            except ValueError as error:
+                code = str(error)
+                self.error(409 if code in {"SHARED_FILE_UNAVAILABLE", "SHARED_TITLE_CONFLICT"} else 400,
+                           code if code in {"SHARED_FILE_UNAVAILABLE", "SHARED_TITLE_CONFLICT"}
+                           else "SHARED_REQUEST_INVALID")
+                return
+            self.audit_commit(created)
+            self.json_response(201 if created else 200, shared)
+            return
+        if path.startswith(PREFIX + "api/shared-documents/") and path.endswith("/claim"):
+            share_id = path[len(PREFIX + "api/shared-documents/"):-len("/claim")]
+            if not valid_uuid(share_id):
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            value = self.get_json(512)
+            if value is None:
+                return
+            if set(value) != {"purpose", "document_kind"}:
+                self.error(400, "SHARED_REQUEST_INVALID")
+                return
+            try:
+                document, created = self.server.store.shared.claim(
+                    session_id, share_id, value["purpose"], value["document_kind"], now_ms)
+            except LookupError:
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            except ValueError as error:
+                code = str(error)
+                self.error(507 if code == "STORAGE_LIMIT" else
+                           409 if code in {"SHARED_KIND_CONFLICT", "SHARED_FILE_UNAVAILABLE"} else 400,
+                           code if code in {"STORAGE_LIMIT", "SHARED_KIND_CONFLICT",
+                                            "SHARED_FILE_UNAVAILABLE", "SHARED_KIND_REQUIRED"}
+                           else "SHARED_REQUEST_INVALID")
+                return
+            self.audit_commit(created)
+            self.json_response(201 if created else 200, document)
+            return
         if path == PREFIX + "api/integration/documents":
             value = self.get_json(MAX_TRIAL_JSON_BYTES, 30)
             if value is None:
@@ -1679,6 +1784,19 @@ class Handler(BaseHTTPRequestHandler):
         if not session_id:
             return
         path = urlsplit(self.path).path
+        if path.startswith(PREFIX + "api/shared-documents/"):
+            share_id = path[len(PREFIX + "api/shared-documents/"):]
+            if not valid_uuid(share_id):
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            try:
+                changed = self.server.store.shared.revoke(session_id, share_id, now_ms)
+            except LookupError:
+                self.error(404, "SHARED_NOT_FOUND")
+                return
+            self.audit_commit(changed)
+            self.json_response(200, {"status": "revoked"})
+            return
         if path.startswith(PREFIX + "api/integration/links/"):
             link_id = path[len(PREFIX + "api/integration/links/"):]
             if not trial_uuid(link_id):

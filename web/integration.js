@@ -15,6 +15,7 @@ const state = {documents: [], links: [], products: [], selected: null, fields: b
   candidate: null, file: null, fileSha: null, matrix: null, requestKey: crypto.randomUUID(),
   source: "manual", kind: "purchase_order", baseline: "", parseBaseline: "", filters: {}, viewed: [],
   selectedProduct: null, productAliases: [], productBaseline: "", duplicateApproval: null};
+let sharedDocuments = [];
 const activity = createActivityLock($("workspace"));
 const labels = {company: "公司", number: "單號", date: "文件日期", currency: "幣別",
   code: "品號", description: "描述", quantity: "數量", unit: "單位",
@@ -36,6 +37,74 @@ function codeMessage(code) {
     TRIAL_PRODUCT_VERSION_CONFLICT: "主檔已有較新修訂；畫面保留你的修改，可先核對後手動載入最新版。",
     TRIAL_ALIAS_CONFLICT: "公司與品號組合已被另一個主檔使用。",
     TRIAL_PRODUCT_INVALID: "主檔描述及每組公司、品號都需完整；最多 20 組。"})[code] || code || "連線或伺服器錯誤";
+}
+function sharedStatus(message, error = false) { $("shared-status").textContent = message;
+  $("shared-status").dataset.error = String(error); }
+function renderShared() {
+  const target = $("shared-list"); target.replaceChildren();
+  if (!sharedDocuments.length) {target.textContent = "目前沒有共用試用 PDF。"; return;}
+  for (const item of sharedDocuments) {
+    const line = document.createElement("div"); line.className = "list-item";
+    const label = document.createElement("span");
+    label.textContent = `${item.title} · ${item.document_kind === "invoice" ? "發票" :
+      item.document_kind === "purchase_order" ? "採購單" : "種類未標示"} · ${item.page_count} 頁 · ${Math.ceil(item.size / 1024)} KiB `;
+    const take = document.createElement("button"); take.type = "button";
+    take.textContent = item.size > maxTrialPdfBytes ? "超過新版 6 MiB 上限" : "選用 PDF";
+    take.disabled = item.size > maxTrialPdfBytes;
+    take.addEventListener("click", () => {void takeShared(item);}); line.append(label, take);
+    if (item.can_revoke) {
+      const revoke = document.createElement("button"); revoke.type = "button"; revoke.textContent = "取消共用";
+      revoke.addEventListener("click", () => {void revokeShared(item);}); line.append(revoke);
+    }
+    target.append(line);
+  }
+}
+async function refreshShared() {
+  try {const data = await api("shared-documents"); sharedDocuments = data.documents; renderShared();}
+  catch (error) {sharedStatus(`清單更新失敗：${codeMessage(error.code)}`, true);}
+}
+async function takeShared(item) {
+  if (activity.busy) return;
+  const chosenKind = item.document_kind || $("shared-kind").value;
+  if (!chosenKind) return sharedStatus("這份 PDF 尚未分類；請先明確選擇採購單或發票。", true);
+  if (item.size > maxTrialPdfBytes) return sharedStatus("原檔超過新版 6 MiB 上限，無法在此頁選用。", true);
+  if (!allowDiscard()) return;
+  await activity.run(async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`/orderflow/api/shared-documents/${item.id}/file`,
+        {credentials: "same-origin", cache: "no-store", signal: controller.signal,
+          headers: {"X-Orderflow-Request": "1"}});
+      if (!response.ok || response.headers.get("Content-Type")?.split(";", 1)[0] !== "application/pdf")
+        throw new Error("SHARED_FILE_UNAVAILABLE");
+      const blob = await response.blob();
+      if (blob.size !== item.size || blob.size < 1 || blob.size > maxTrialPdfBytes)
+        throw new Error("SHARED_FILE_UNAVAILABLE");
+      const file = new File([blob], "shared-trial.pdf", {type: "application/pdf"});
+      newDocument(true);
+      state.kind = chosenKind;
+      state.source = "pdf"; state.file = file; state.fileSha = await hashFile(file);
+      $("kind").value = state.kind; $("source").value = "pdf";
+      $("source-file").disabled = false; $("source-file").accept = ".pdf,application/pdf";
+      $("parse-file").disabled = !canParseFile();
+      renderEditor();
+      state.parseBaseline = JSON.stringify(collectFields());
+      sourceStatus(state.kind === "invoice" ?
+        "已選用共用發票 PDF；請人工填寫並核對，這個解析器只支援指定採購單版型。尚未保存。" :
+        "已選用共用 PDF；可嘗試本機解析或人工填寫。尚未保存。",
+      );
+      sharedStatus("PDF 已選入此瀏覽器；仍需人工確認並保存，不會自動呼叫 Google。");
+      $("editor").scrollIntoView({block: "start"});
+    } catch {sharedStatus("共用 PDF 無法取用；可能已取消共用、原檔不可用或連線逾時。", true);}
+    finally {clearTimeout(timer);}
+  });
+}
+async function revokeShared(item) {
+  if (!window.confirm("取消共用只阻止新的取用；已保存的副本仍保留。確定嗎？")) return;
+  try {await api(`shared-documents/${item.id}`, "DELETE"); await refreshShared();
+    sharedStatus("已取消共用；先前副本仍保留。");}
+  catch (error) {sharedStatus(`取消失敗：${codeMessage(error.code)}`, true);}
 }
 function parseMessage(code) {
   return ({LOCAL_PAGE_COUNT_UNSUPPORTED: "目前只支援單頁科雅採購憑單",
@@ -197,14 +266,15 @@ function chooseSource() {
   state.fields = blankFields(); renderEditor(); rememberBaseline();
   sourceStatus(state.source === "manual" ? "人工輸入。" : "請選原檔；可解析，或直接人工填寫。尚未上傳。");
 }
+function canParseFile() {return !!state.file && (state.source === "xlsx" || state.kind !== "invoice");}
 function fileSelected() {
   if (state.selected) return;
   const replacement = $("source-file").files[0] || null;
   if ((state.file || hasUnsaved()) && !allowDiscard()) {$("source-file").value = "";
-    $("parse-file").disabled = !state.file; return;}
+    $("parse-file").disabled = !canParseFile(); return;}
   clearDuplicateReview();
   state.file = replacement; state.fileSha = null; state.matrix = null; state.candidate = null;
-  $("mapping").hidden = true; $("parse-file").disabled = !state.file;
+  $("mapping").hidden = true; $("parse-file").disabled = !canParseFile();
   if (!state.file) return sourceStatus("尚未選檔。");
   const limit = state.source === "pdf" ? maxTrialPdfBytes : 2 * 1024 * 1024;
   const extension = state.source === "pdf" ? ".pdf" : ".xlsx";
@@ -231,7 +301,7 @@ async function parsePdf(file) {
   }); } finally {worker.terminate();}
 }
 async function parseFile() {
-  const file = state.file; if (!file || activity.busy) return;
+  const file = state.file; if (!canParseFile() || activity.busy) return;
   if (JSON.stringify(collectFields()) !== state.parseBaseline &&
       !window.confirm("重新解析會替換目前人工編修的欄位。確定繼續？")) return;
   const source = state.source;
@@ -551,7 +621,7 @@ async function refresh() {
   const data = await api("integration/bootstrap");
   $("workspace").hidden = false; $("login-section").hidden = true;
   state.documents = data.documents; state.links = data.links; state.products = data.products;
-  renderLinks(); renderProducts(); updateDuplicateHint(); await search();
+  renderLinks(); renderProducts(); updateDuplicateHint(); await search(); await refreshShared();
 }
 async function login(event) {
   event.preventDefault(); const password = $("password").value; $("password").value = "";
@@ -561,10 +631,13 @@ async function login(event) {
 $("login-form").addEventListener("submit", login);
 $("source").addEventListener("change", chooseSource);
 $("kind").addEventListener("change", () => {if (!state.selected) {
-  clearDuplicateReview(); state.kind = $("kind").value; updateDuplicateHint();}});
+  clearDuplicateReview(); state.kind = $("kind").value;
+  $("parse-file").disabled = !canParseFile();
+  updateDuplicateHint();}});
 $("editor").addEventListener("input", clearDuplicateReview);
 for (const key of ["company", "number"]) $("field-" + key).addEventListener("input", updateDuplicateHint);
 $("source-file").addEventListener("change", fileSelected);
+$("shared-refresh").addEventListener("click", refreshShared);
 $("parse-file").addEventListener("click", parseFile);
 $("new-manual").addEventListener("click", () => newDocument());
 $("open-original").addEventListener("click", openOriginal);
