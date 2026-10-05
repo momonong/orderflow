@@ -111,7 +111,9 @@ def evidence(lab: Lab, clients: list[Client]) -> dict:
         audit = list(lab.audit.events)
     with lab.fake.lock:
         calls = dict(lab.fake.calls_by_kind)
-    return {"injection_truth": {"trigger_count": trigger_count, "events": injected,
+    return {"run_id": lab.run_id,
+            "version": {"app": app.VERSION, "diagnostics": app.BUILD_ID},
+            "injection_truth": {"trigger_count": trigger_count, "events": injected,
                                 "fake_ai_calls": calls},
             "http_observations": [item for client in clients for item in client.observations],
             "backend_audit": audit, "db_state": lab.state()}
@@ -320,7 +322,8 @@ def main() -> None:
         result = run()
         name = result["case"]
         (args.output / f"{name}.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
-        summary.append({"case": name, "classification": result["classification"], "passed": True})
+        summary.append({"case": name, "run_id": result["run_id"],
+                        "classification": result["classification"], "passed": True})
         print(name, "PASS", flush=True)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Reports: {args.output}")

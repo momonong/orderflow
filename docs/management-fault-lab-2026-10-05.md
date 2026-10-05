@@ -16,7 +16,7 @@
 PYTHONPATH=. .venv/bin/python tools/fault_lab.py run-all --output /tmp/orderflow-fault-lab-recheck
 ```
 
-本輪逐案例原始紀錄位於 `/tmp/orderflow-management-fault-lab-20261005-verified/`，含 HTTP 觀察、代理注入事件、正式 audit 事件、假 AI 次數與 DB 結果；原診斷回歸紀錄位於 `/tmp/orderflow-fault-lab-regression-20261005-final/`。這些是本機暫存紀錄，重跑時指定新目錄即可保留舊報告。
+本輪逐案例原始紀錄位於 `/tmp/orderflow-management-fault-lab-20261005-run-id/`，每案含唯一 `run_id`、應用版本 `0.3.0`、診斷 build `diag-20261002-01`、HTTP 觀察、代理注入事件、正式 audit 事件、假 AI 次數與 DB 結果；`summary.json` 的 `run_id` 與各案報告一致且八個值互不相同。原診斷回歸紀錄位於 `/tmp/orderflow-fault-lab-regression-20261005-final/`。這些是本機暫存紀錄，重跑時指定新目錄即可保留舊報告。
 
 ## 案例與判定
 
