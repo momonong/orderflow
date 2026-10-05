@@ -10,7 +10,7 @@
 </head>
 <body>
   <main>
-    <nav><a href="/orderflow/">返回管理首頁</a></nav>
+    <nav><a href="/orderflow/">返回管理首頁</a> · <a href="/orderflow/help/">圖文使用說明</a></nav>
     <header>
       <p class="eyebrow">OrderFlow · 示範測試</p>
       <h1>試試 PDF 能否上傳並顯示結果</h1>
@@ -60,6 +60,14 @@
       <button id="upload-button" type="button" disabled>確認上傳</button>
       <p id="upload-status" class="status" role="status">請先完成連線檢查，再選一份測試 PDF。</p>
       <div id="document-list" aria-label="本次已上傳的測試文件"></div>
+      <section aria-labelledby="shared-title"><h3 id="shared-title">共用試用 PDF</h3>
+        <p>選用共用文件不算本次瀏覽器上傳通過；不會自動呼叫 Google。只有本人明確加入的 PDF 才供其他登入者取用。</p>
+        <label for="shared-name">給目前選取文件的共用名稱</label><input id="shared-name" maxlength="80" placeholder="例如：示範測試 PDF">
+        <button id="share-current" type="button">將目前文件加入共用清單</button>
+        <button id="shared-refresh" type="button">更新共用清單</button>
+        <p id="shared-status" class="status" role="status"></p><div id="shared-list"></div>
+        <p class="hint">取消共用只阻止新的取用；先前已取得的副本仍保留。</p>
+      </section>
     </section>
 
     <section aria-labelledby="ai-title">

@@ -48,7 +48,7 @@ class AuditQuotaTests(unittest.TestCase):
         self.assertEqual((failure["format_reason"], failure["field"], failure["code"]),
                          ("FIELD_TYPE", "qty", "RESULT_FORMAT_INVALID"))
         self.assertEqual((failure["version"], failure["build_id"]),
-                         ("0.3.0", "diag-20261002-01"))
+                         ("0.3.1", "diag-20261005-01"))
         self.assertNotIn("PRIVATE_CUSTOMER_MARKER", output.getvalue())
         self.assertIn("routine", [record.get("category") for record in records
                                   if record["event"] == "audit_limit"])

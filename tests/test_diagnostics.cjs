@@ -16,7 +16,7 @@ const context = vm.createContext({
 });
 vm.runInContext(source, context);
 const reporter = context.window.OrderflowDiagnostics.create("/orderflow/api/");
-assert.match(reporter.summary(), /診斷腳本版本：diag-20261002-01/);
+assert.match(reporter.summary(), /診斷腳本版本：diag-20261005-01/);
 assert.match(reporter.summary(), /操作開始（瀏覽器 UTC）：\d{4}-\d\d-\d\dT/);
 assert.match(reporter.summary(), /複製時間（瀏覽器 UTC）：\d{4}-\d\d-\d\dT/);
 const secret = "PRIVATE_PDF_AND_KEY_SENTINEL";

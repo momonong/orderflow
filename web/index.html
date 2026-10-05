@@ -16,6 +16,7 @@
         <a class="button quiet" href="/orderflow/integration/">整合測試（新版）</a>
         <button id="csv-export" class="button quiet" type="button" hidden>CSV 匯出</button>
         <a class="button quiet" href="/orderflow/test/">診斷測試</a>
+        <a class="button quiet" href="/orderflow/help/">圖文使用說明</a>
         <button id="logout" class="button quiet" type="button" hidden>登出</button>
       </div>
     </header>
@@ -79,7 +80,14 @@
             <p id="upload-status" class="status" role="status">尚未選檔。</p>
             <button id="retry-upload" class="quiet" type="button" hidden>重試同一份上傳</button>
             <div class="legacy-upload" hidden><label for="pdf">選擇 PDF</label><input id="pdf" type="file" accept="application/pdf,.pdf"><button id="upload" type="button">上傳這份 PDF</button></div>
-            <h3>這個登入工作區的文件</h3><div id="documents" class="document-list"></div>
+            <h3>我的文件</h3><div id="documents" class="document-list"></div>
+          </div></section>
+          <section class="card" aria-labelledby="shared-title"><div class="card-heading"><h2 id="shared-title">共用試用文件（PDF）</h2></div><div class="card-body">
+            <p>只有本人明確加入的文件才會出現在這裡。其他登入者可讀原 PDF；取消共用只阻止新的取用，已取得的副本不會被收回。選用只加入我的文件，不會自動送交 Google。</p>
+            <label for="shared-title-input">給目前選取文件的共用名稱</label><input id="shared-title-input" maxlength="80" placeholder="例如：示範採購單 A">
+            <div class="actions"><button id="share-selected" type="button">將我的文件加入共用試用清單</button><button id="refresh-shared" class="quiet" type="button">更新共用清單</button></div>
+            <label for="shared-kind">來源未分類時，選用為</label><select id="shared-kind"><option value="">請先選文件種類</option><option value="purchase_order">採購單</option><option value="invoice">發票</option></select>
+            <p id="shared-status" class="status" role="status"></p><div id="shared-list" class="document-list"></div>
           </div></section>
           <section class="card" aria-labelledby="ai-title"><div class="card-heading"><h2 id="ai-title">辨識品項</h2></div><div class="card-body">
             <p id="selection">請先上傳或選取文件。</p><p class="notice"><strong>每次辨識都會將選取的 PDF 傳給 Google，並可能使用 API 額度。</strong>請先確認文件可外傳；AI 品項需人工核對。</p>

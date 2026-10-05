@@ -10,8 +10,8 @@ import time
 import uuid
 
 EVENTS = {"http", "real_job", "key_check", "client_observation"}
-APP_VERSION = "0.3.0"
-BUILD_ID = "diag-20261002-01"
+APP_VERSION = "0.3.1"
+BUILD_ID = "diag-20261005-01"
 PHASES = {
     "received", "response_written", "response_write_unknown", "created",
     "start", "ai_start", "ai_response", "format_pass", "done", "failed",
@@ -24,7 +24,7 @@ ROUTES = {
     "bootstrap", "management_bootstrap", "documents", "management_documents",
     "jobs", "management_jobs", "job_get", "management_job_get", "local_sources",
     "record_sets", "drafts", "key_check", "echo", "sample", "diagnostics", "other_api",
-    "integration",
+    "integration", "shared_documents",
 }
 CLIENT_CODES = {
     "NONE", "HTTP_ERROR", "BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIMEOUT",

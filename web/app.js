@@ -3,8 +3,8 @@
 const base = "/orderflow/api/";
 const $ = (id) => document.getElementById(id);
 const labels = {pass: "通過", fail: "失敗", unknown: "結果不明", not_run: "未執行"};
-const names = ["page", "script", "style", "api", "sample", "upload", "integrity", "query", "text_check", "ai", "format", "render", "clipboard"];
-const titles = {page: "網頁", script: "JavaScript", style: "樣式", api: "同站 API", sample: "固定資料渲染", upload: "PDF 上傳", integrity: "完整性", query: "工作查詢", text_check: "Google 文字連線", ai: "AI 辨識", format: "結果格式", render: "結果渲染", clipboard: "報告複製"};
+const names = ["page", "script", "style", "api", "sample", "upload", "shared", "integrity", "query", "text_check", "ai", "format", "render", "clipboard"];
+const titles = {page: "網頁", script: "JavaScript", style: "樣式", api: "同站 API", sample: "固定資料渲染", upload: "本次瀏覽器 PDF 上傳", shared: "本次共用 PDF 取用", integrity: "完整性", query: "工作查詢", text_check: "Google 文字連線", ai: "AI 辨識", format: "結果格式", render: "結果渲染", clipboard: "報告複製"};
 const steps = Object.fromEntries(names.map((name) => [name, {status: "not_run"}]));
 steps.page = {status: "pass"};
 steps.script = {status: "pass"};
@@ -13,9 +13,12 @@ const diagnostics = (typeof window !== "undefined" && window.OrderflowDiagnostic
   record() {}, flush() {}, summary() { return "瀏覽器事件記錄未載入。"; },
   newOperation() {}, get traceId() { return testId; }
 };
-let version = "0.3.0";
+let version = "0.3.1";
 let maxBytes = 8 * 1024 * 1024;
 let documents = [];
+let sharedDocuments = [];
+const uploadedThisPage = new Set();
+const claimedThisPage = new Set();
 let jobs = [];
 let currentDocument = null;
 let currentJob = null;
@@ -66,6 +69,7 @@ function showLogin(message = "請輸入網站登入密碼，才能查看測試�
   clearKeyInput();
   $("report").value = "";
   documents = [];
+  sharedDocuments = []; uploadedThisPage.clear(); claimedThisPage.clear();
   jobs = [];
   currentDocument = null;
   currentJob = null;
@@ -153,7 +157,7 @@ function onFileChanged() {
   $("report-section").classList.remove("ready");
   renderRows($("result-body"), []);
   $("result-mode").textContent = "尚未產生結果。";
-  for (const name of ["upload", "integrity", "ai", "format", "render"]) mark(name, "not_run");
+  for (const name of ["upload", "shared", "integrity", "ai", "format", "render"]) mark(name, "not_run");
   setStatus("ai-status", "請先完成上傳。");
   setStatus("real-status", "請先上傳測試 PDF。");
   updateUploadChoice();
@@ -211,7 +215,8 @@ const reportCodes = new Set(["BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIME
   "AI_HTTP_UNKNOWN", "AI_RESULT_UNKNOWN", "AI_FAILURE", "KEY_REQUIRED", "JOB_LIMIT", "UPLOAD_INCOMPLETE",
   "PDF_INVALID", "PDF_REQUIRED", "BAD_SIZE", "FILE_TOO_LARGE", "STORAGE_LIMIT",
   "UPLOAD_BUSY", "HASH_MISMATCH", "SIZE_MISMATCH", "PDF_CHECK_TIMEOUT",
-  "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "SESSION_EXPIRED"]);
+  "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "SESSION_EXPIRED",
+  "SHARED_NOT_FOUND", "SHARED_FILE_UNAVAILABLE", "SHARED_REQUEST_INVALID"]);
 function reportUuid(value) {
   return typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
@@ -288,6 +293,8 @@ function updateReport() {
     `時間：${new Date().toISOString()}`,
     `測試識別：${testId}`,
     `文件識別：${reportUuid(currentDocument?.id)}`,
+    `文件來源：${currentDocument?.source_type === "shared" ? "共用 PDF 副本" :
+      currentDocument ? "我的 PDF（本次是否上傳見下方步驟）" : "未選擇"}`,
     `工作識別：${reportUuid(currentJob?.id)}`,
     `辨識模式：${currentJob?.mode === "real" ? "Google Gemini PDF 請求；內容仍需人工核對" : "固定資料模擬"}`,
     "步驟："
@@ -321,10 +328,67 @@ function renderDocuments() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "document";
-    button.textContent = `選用 ${new Date(doc.created_ms).toLocaleString("zh-TW")} 上傳的測試 PDF（${fileSize(doc.size)}）`;
+    button.textContent = `選用 ${new Date(doc.created_ms).toLocaleString("zh-TW")} 的${doc.source_type === "shared" ? "共用" : "已上傳"}測試 PDF（${fileSize(doc.size)}）`;
     button.addEventListener("click", () => selectDocument(doc));
     list.append(button);
   }
+}
+function renderShared() {
+  const target = $("shared-list"); target.replaceChildren();
+  if (!sharedDocuments.length) { target.textContent = "目前沒有共用試用 PDF。"; return; }
+  for (const item of sharedDocuments) {
+    const line = document.createElement("div"); line.className = "shared-item";
+    const label = document.createElement("span");
+    label.textContent = `${item.title} · ${item.document_kind === "purchase_order" ? "採購單" :
+      item.document_kind === "invoice" ? "發票" : "未分類 PDF"} · ${item.page_count} 頁 · ${fileSize(item.size)} `;
+    line.append(label);
+    const take = document.createElement("button"); take.type = "button"; take.textContent = "選用共用 PDF";
+    take.addEventListener("click", () => { void claimShared(item); }); line.append(take);
+    if (item.can_revoke) {
+      const revoke = document.createElement("button"); revoke.type = "button"; revoke.textContent = "取消共用";
+      revoke.addEventListener("click", () => { void revokeShared(item); }); line.append(revoke);
+    }
+    target.append(line);
+  }
+}
+async function refreshShared() {
+  try { sharedDocuments = (await api("shared-documents")).data.documents; renderShared(); }
+  catch (error) { setStatus("shared-status", `共用清單更新失敗：${safeCode(error, "SHARED_LIST_FAILED")}`, "fail"); }
+}
+async function shareCurrent() {
+  if (!currentDocument || currentDocument.source_type === "shared")
+    return setStatus("shared-status", "請先選自己已上傳的 PDF；共用副本不能再次分享。", "fail");
+  const title = $("shared-name").value.trim();
+  if (!title || title.length > 80) return setStatus("shared-status", "請填 1–80 字的共用名稱，不要放客戶個資。", "fail");
+  try {
+    await api("shared-documents", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({source_purpose: "diagnostic", document_id: currentDocument.id, title})});
+    await refreshShared(); setStatus("shared-status", "已加入共用清單；其他登入者可讀原 PDF。", "pass");
+  } catch (error) { setStatus("shared-status", `加入未完成：${safeCode(error, "SHARED_REQUEST_FAILED")}`, "fail"); }
+}
+async function claimShared(item) {
+  try {
+    const response = await api(`shared-documents/${item.id}/claim`, {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({purpose: "diagnostic", document_kind: null})});
+    const doc = response.data;
+    documents = [doc, ...documents.filter(value => value.id !== doc.id)];
+    claimedThisPage.add(doc.id); renderDocuments(); selectDocument(doc);
+    mark("shared", "pass", {http: response.status});
+    setStatus("shared-status", "已選用共用 PDF；本次瀏覽器上傳仍是未執行，AI 不會自動啟動。", "pass");
+  } catch (error) {
+    mark("shared", error.unknown ? "unknown" : "fail", {code: safeCode(error, "SHARED_REQUEST_INVALID")});
+    setStatus("shared-status", error.unknown ?
+      "選用結果不明；請先重新整理並查看我的文件，不要立即重試。" :
+      `選用未完成：${safeCode(error, "SHARED_REQUEST_INVALID")}`, error.unknown ? "unknown" : "fail");
+  }
+}
+async function revokeShared(item) {
+  if (!window.confirm("取消共用只阻止新的取用；已取得的副本仍保留。確定嗎？")) return;
+  try {
+    await api(`shared-documents/${item.id}`, {method: "DELETE"});
+    await refreshShared(); setStatus("shared-status", "已取消共用；先前副本仍保留。", "pass");
+  } catch (error) { setStatus("shared-status", `取消未完成：${safeCode(error, "SHARED_REQUEST_FAILED")}`, "fail"); }
 }
 function selectDocument(doc) {
   uploadUnknown = false;
@@ -335,9 +399,14 @@ function selectDocument(doc) {
   updateRealControls();
   $("recognize-button").disabled = !!currentJob;
   $("rerun-button").disabled = !currentJob;
-  setStatus("upload-status", "測試 PDF 已完整送到提供此網站的電腦。", "pass");
+  const uploadedNow = uploadedThisPage.has(doc.id);
+  const claimedNow = claimedThisPage.has(doc.id);
+  setStatus("upload-status", uploadedNow ? "本次瀏覽器上傳完成。" :
+    doc.source_type === "shared" ? "已選用共用 PDF；本次瀏覽器上傳尚未測試。" :
+    "已選取歷史 PDF；本次瀏覽器上傳尚未測試。", uploadedNow ? "pass" : "");
   setStatus("real-status", aiKeyConfigured ? "可以按下方按鈕開始真正辨識。" : "請先設定金鑰才能開始真正辨識。");
-  mark("upload", "pass", {ms: doc.upload_ms, http: 201});
+  mark("upload", uploadedNow ? "pass" : "not_run");
+  mark("shared", claimedNow ? "pass" : "not_run");
   mark("integrity", "pass");
   if (currentJob) showJob(currentJob);
   else {
@@ -470,6 +539,7 @@ async function upload() {
     const doc = response.data;
     if (doc.size !== file.size || doc.sha256 !== hash) throw {code: "RECEIPT_MISMATCH"};
     documents.unshift(doc);
+    uploadedThisPage.add(doc.id);
     renderDocuments();
     selectDocument(doc);
     mark("upload", "pass", {ms: Math.round(performance.now() - start), http: response.status});
@@ -656,6 +726,7 @@ async function loadBootstrap() {
     updateRealControls();
     mark("query", "pass", {http: response.status});
     renderDocuments();
+    await refreshShared();
     if (documents.length) {
       selectDocument(documents[0]);
       setStatus("basic-status", "已找回先前的上傳紀錄；若要測新檔案，請先按「檢查連線」。");
@@ -684,6 +755,8 @@ async function initialize() {
   mark("style", styleLoaded ? "pass" : "fail", styleLoaded ? {} : {code: "STYLE_MISSING"});
   $("basic-button").addEventListener("click", runBasic);
   $("upload-button").addEventListener("click", upload);
+  $("share-current").addEventListener("click", shareCurrent);
+  $("shared-refresh").addEventListener("click", refreshShared);
   $("pdf-file").addEventListener("change", onFileChanged);
   $("recognize-button").addEventListener("click", () => recognize(false));
   $("rerun-button").addEventListener("click", () => { jobKey = null; recognize(true); });

@@ -1,7 +1,7 @@
 "use strict";
 const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
-const state = {documents: [], jobs: [], drafts: [], recordSets: [], localSources: [],
+const state = {documents: [], jobs: [], drafts: [], recordSets: [], localSources: [], shared: [],
   localSource: null, localPreview: null, parseTask: null, key: false, selected: null,
   job: null, rows: [], recordIssues: [], revision: 0, editSerial: 0,
   dirty: false, busy: false, uploadKey: null,
@@ -130,7 +130,7 @@ function showLogin(message = "請輸入網站密碼。", preserveEditor = false)
   el("logout").hidden = true; el("password").value = ""; clearKeyInput();
   if (!preserveEditor) {
     state.documents = []; state.jobs = []; state.drafts = []; state.recordSets = [];
-    state.localSources = []; state.localSource = null; state.localPreview = null;
+    state.localSources = []; state.shared = []; state.localSource = null; state.localPreview = null;
     state.selected = null; state.job = null; state.rows = []; state.pendingRecordEdit = null;
   }
   state.pendingFile = null; state.pendingKind = null; state.key = false;
@@ -143,6 +143,7 @@ function showWorkspace(data) {
   state.documents = data.documents || []; state.jobs = data.jobs || [];
   state.drafts = data.drafts || []; state.recordSets = data.record_sets || [];
   state.localSources = data.local_sources || [];
+  state.shared = data.shared_documents || [];
   const pending = state.pendingRecordEdit;
   const canRestore = pending && state.documents.some(doc => doc.id === pending.documentId) &&
     (state.jobs.some(job => job.id === pending.jobId && job.document_id === pending.documentId && job.state === "done") ||
@@ -164,6 +165,7 @@ function showWorkspace(data) {
   if (state.localPreview) state.selected = null;
   if (!state.selected && !state.localPreview && state.documents.length) state.selected = state.documents[0].id;
   renderDocuments();
+  renderShared();
   if (state.localPreview) activateLocalPreview(true);
   else if (canRestore && pending.localSourceId) selectLocalSource(pending.localSourceId);
   else if (canRestore) selectJob(pending.jobId);
@@ -184,7 +186,11 @@ function showWorkspace(data) {
 async function load() {
   el("startup").hidden = false; el("retry").hidden = true;
   status("startup-status", "正在確認登入及資料狀態。");
-  try { showWorkspace(await api("management/bootstrap")); }
+  try {
+    const data = await api("management/bootstrap");
+    showWorkspace(data);
+    await refreshShared();
+  }
   catch (error) {
     if (error.status === 401) {
       const preserve = !!(state.pendingRecordEdit || state.localPreview);
@@ -225,6 +231,71 @@ function renderDocuments() {
   el("selection").textContent = selected ? `已選文件：${selected.page_count || "?"} 頁、${selected.size} bytes。`
     : state.localPreview ? "本機解析預覽：尚未上傳 PDF。" : "請先上傳或選取文件。";
   renderJobs();
+}
+function renderShared() {
+  const target = el("shared-list"); target.replaceChildren();
+  if (!state.shared.length) { target.textContent = "目前沒有共用試用 PDF。"; return; }
+  for (const item of state.shared) {
+    const line = document.createElement("div"); line.className = "list-button shared-row";
+    const label = item.document_kind === "purchase_order" ? "採購單" :
+      item.document_kind === "invoice" ? "發票" : "未分類 PDF";
+    const text = document.createElement("span");
+    text.textContent = `${item.title} · ${label} · ${item.page_count} 頁 · ${Math.ceil(item.size / 1024)} KB `;
+    line.append(text);
+    const take = document.createElement("button"); take.type = "button"; take.textContent = "選用到我的文件";
+    take.addEventListener("click", () => { void claimShared(item); }); line.append(take);
+    if (item.can_revoke) {
+      const revoke = document.createElement("button"); revoke.type = "button";
+      revoke.className = "quiet"; revoke.textContent = "取消共用";
+      revoke.addEventListener("click", () => { void revokeShared(item); }); line.append(revoke);
+    }
+    target.append(line);
+  }
+}
+async function refreshShared() {
+  try { state.shared = (await api("shared-documents")).documents; renderShared(); }
+  catch (error) { status("shared-status", `共用清單更新失敗：${safeError(error)}`, "error"); }
+}
+async function shareSelected() {
+  if (!state.selected || state.busy) return status("shared-status", "請先在「我的文件」選一份已上傳的 PDF。", "error");
+  if (state.documents.find(doc => doc.id === state.selected)?.source_type === "shared")
+    return status("shared-status", "共用副本不能再次分享；請選自己上傳的 PDF。", "error");
+  const title = el("shared-title-input").value.trim();
+  if (!title || title.length > 80) return status("shared-status", "請填 1–80 字的共用名稱，不要放客戶個資。", "error");
+  state.busy = true; refreshControls();
+  try {
+    await api("shared-documents", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({source_purpose: "management", document_id: state.selected, title})});
+    await refreshShared(); status("shared-status", "已加入共用試用清單。其他登入者可讀原 PDF。", "good");
+  } catch (error) { status("shared-status", `加入未完成：${safeError(error)}`, "error"); }
+  finally { state.busy = false; refreshControls(); }
+}
+async function claimShared(item) {
+  if (state.busy) return;
+  if ((state.localPreview || state.dirty) && !window.confirm("目前有未存編修。選用其他 PDF 會離開目前核對內容；要繼續嗎？")) return;
+  const kind = item.document_kind || el("shared-kind").value;
+  if (!kind) return status("shared-status", "這份 PDF 尚未分類；請先明確選擇採購單或發票。", "error");
+  state.busy = true; refreshControls();
+  try {
+    const doc = await api(`shared-documents/${item.id}/claim`, {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({purpose: "management", document_kind: kind})});
+    state.documents = [doc, ...state.documents.filter(existing => existing.id !== doc.id)];
+    state.selected = doc.id; state.job = null; state.localPreview = null;
+    el("local-hints").hidden = true; clearDraft(); renderDocuments(); selectSelectedSource();
+    showPage("upload");
+    status("shared-status", "已加入我的文件；尚未送交 Google。需要辨識時，再自行套用金鑰並確認送出。", "good");
+  } catch (error) { status("shared-status", `選用未完成：${safeError(error)}`, "error"); }
+  finally { state.busy = false; refreshControls(); }
+}
+async function revokeShared(item) {
+  if (state.busy || !window.confirm("取消共用後，其他人不能再新選用；已取得的副本仍會保留。確定嗎？")) return;
+  state.busy = true; refreshControls();
+  try {
+    await api(`shared-documents/${item.id}`, {method: "DELETE"});
+    await refreshShared(); status("shared-status", "已取消共用；已取得的副本仍保留。", "good");
+  } catch (error) { status("shared-status", `取消未完成：${safeError(error)}`, "error"); }
+  finally { state.busy = false; refreshControls(); }
 }
 function renderJobs() {
   const target = el("jobs"); target.replaceChildren();
@@ -1199,6 +1270,8 @@ el("add-row").addEventListener("click", () => {
 });
 el("save-draft").addEventListener("click", saveDraft);
 el("csv-export").addEventListener("click", exportCsv);
+el("share-selected").addEventListener("click", shareSelected);
+el("refresh-shared").addEventListener("click", refreshShared);
 for (const [id, kind] of [["purchase-pdf", "purchase_order"], ["invoice-pdf", "invoice"]]) {
   el(id).addEventListener("change", event => chooseTypedFile(event.target.files?.[0], kind));
 }

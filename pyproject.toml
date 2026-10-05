@@ -1,6 +1,6 @@
 [project]
 name = "orderflow-feasibility"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local OrderFlow connectivity and PDF transfer feasibility check"
 requires-python = ">=3.12"
 dependencies = [
