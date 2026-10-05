@@ -39,6 +39,10 @@ SCENARIOS = {
     "post_truncate": ("post_truncate", None),
     "receipt_lost_after_commit": ("receipt_lost_after_commit", None),
     "result_lost_after_commit": ("result_lost_after_commit", None),
+    "management_receipt_lost_after_commit": ("management_receipt_lost_after_commit", None),
+    "management_result_lost_after_commit": ("management_result_lost_after_commit", None),
+    "management_ai_503": (None, "503"),
+    "management_ai_429": (None, "429"),
     "diagnostics_blocked": ("diagnostics_blocked", None),
     "ai_401": (None, "401"),
     "ai_403": (None, "403"),
@@ -47,6 +51,7 @@ SCENARIOS = {
     "ai_timeout": (None, "timeout"),
     "ai_invalid": (None, "invalid"),
 }
+MANAGEMENT_SCENARIOS = {name for name in SCENARIOS if name.startswith("management_")}
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailers", "transfer-encoding", "upgrade"}
 
@@ -85,7 +90,11 @@ class FakeGoogle(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), FakeGoogleHandler)
         self.fault = fault
         self.call_count = 0
+        self.calls_by_kind = {"diagnostic": 0, "purchase_order": 0, "invoice": 0}
         self.lock = threading.Lock()
+        self.release = threading.Event()
+        self.release.set()
+        self.entered = threading.Event()
 
 
 class FakeGoogleHandler(BaseHTTPRequestHandler):
@@ -109,9 +118,16 @@ class FakeGoogleHandler(BaseHTTPRequestHandler):
         if self.path != "/fake-google/generate" or not 0 < length < 12 * 1024 * 1024:
             self.send_error(404)
             return
-        self.rfile.read(length)
+        body = self.rfile.read(length)
+        kind = ("purchase_order" if b"This is a purchase order." in body else
+                "invoice" if b"This is an invoice." in body else "diagnostic")
+        del body
         with self.server.lock:
             self.server.call_count += 1
+            self.server.calls_by_kind[kind] += 1
+        self.server.entered.set()
+        if not self.server.release.wait(timeout=30):
+            return
         fault = self.server.fault
         if fault == "timeout":
             # The real job grants GeminiAdapter 25 seconds.  Exceed that bound
@@ -122,8 +138,16 @@ class FakeGoogleHandler(BaseHTTPRequestHandler):
             payload = b'{"error":{"status":"UNCLASSIFIED"}}'
             self.send_response(int(fault))
         else:
-            value = "not-json" if fault == "invalid" else json.dumps({"items": [
-                {"description": "Synthetic item", "quantity": 2}]})
+            item = ({"orderNo": "PO-SYN-1", "client": "Synthetic buyer",
+                     "product": "Synthetic widget", "code": "SYN-1", "qty": "2",
+                     "unitPrice": "3.50", "amount": "7.00", "currency": "USD",
+                     "date": "2026-10-05", "unit": "pcs"} if kind == "purchase_order" else
+                    {"invoiceNo": "INV-SYN-1", "client": "Synthetic customer",
+                     "product": "Synthetic widget", "code": "SYN-1", "qty": "2",
+                     "unitPrice": "3.50", "amount": "7.00", "currency": "USD",
+                     "date": "2026-10-05", "unit": "pcs"} if kind == "invoice" else
+                    {"description": "Synthetic item", "quantity": 2})
+            value = "not-json" if fault == "invalid" else json.dumps({"items": [item]})
             payload = json.dumps({"candidates": [{"content": {"parts": [
                 {"text": value}]}}]}).encode()
             self.send_response(200)
@@ -158,9 +182,13 @@ class Proxy(ThreadingHTTPServer):
         fault = self.fault
         post = method == "POST" and path == "/orderflow/api/jobs"
         get = method == "GET" and path.startswith("/orderflow/api/jobs/")
+        management_post = method == "POST" and path == "/orderflow/api/management/jobs"
+        management_get = method == "GET" and path.startswith("/orderflow/api/management/jobs/")
         diagnostic = method == "POST" and path == "/orderflow/api/diagnostics"
         target = ((fault or "").startswith("post_") or fault == "receipt_lost_after_commit") and post
         target |= fault == "result_lost_after_commit" and get
+        target |= fault == "management_receipt_lost_after_commit" and management_post
+        target |= fault == "management_result_lost_after_commit" and management_get
         target |= fault == "diagnostics_blocked" and diagnostic
         if not target:
             return None
@@ -185,6 +213,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.forward()
 
     def do_DELETE(self) -> None:
+        self.forward()
+
+    def do_PUT(self) -> None:
         self.forward()
 
     def reply(self, code: int, body: bytes, content_type: str, marker: bool = False) -> None:
@@ -247,7 +278,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.reply(403, b"host rejected", "text/plain")
             return
         expected_origin = f"http://{expected_host}"
-        if self.command in {"POST", "DELETE"} and self.headers.get("Origin") != expected_origin:
+        if self.command in {"POST", "PUT", "DELETE"} and self.headers.get("Origin") != expected_origin:
             self.reply(403, b"origin rejected", "text/plain")
             return
         if self.command == "GET" and path == "/__lab/session":
@@ -308,7 +339,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             banner = ('<aside role="note"><strong>OrderFlow 本機故障實驗：</strong>'
                       '僅使用合成 PDF 與本機假 Google；不會呼叫真實 Google API。</aside>').encode()
             data = data.replace(b"<body>", b"<body>" + banner, 1)
-        if fault in {"receipt_lost_after_commit", "result_lost_after_commit"}:
+        if fault in {"receipt_lost_after_commit", "result_lost_after_commit",
+                     "management_receipt_lost_after_commit",
+                     "management_result_lost_after_commit"}:
             event["client_delivery"] = "connection_closed_before_headers"
             self.server.record(event)
             self.close_connection = True
@@ -378,6 +411,7 @@ class Lab:
         return self
 
     def __exit__(self, *_args: object) -> None:
+        self.fake.release.set()
         for server in (self.proxy, self.backend, self.fake):
             server.shutdown()
             server.server_close()
@@ -420,7 +454,7 @@ class Client:
         conn = http.client.HTTPConnection("127.0.0.1", self.lab.proxy.server_port, timeout=timeout)
         sent_headers = {"X-Orderflow-Request": "1", "X-Orderflow-Request-Id": request_id,
                         "X-Orderflow-Trace-Id": self.trace_id, **(headers or {})}
-        if method in {"POST", "DELETE"}:
+        if method in {"POST", "PUT", "DELETE"}:
             sent_headers["Origin"] = self.lab.url
         if self.cookie:
             sent_headers["Cookie"] = self.cookie
@@ -685,14 +719,15 @@ def markdown_report(report: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("run", "run-all", "serve"))
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="normal")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS.keys() - MANAGEMENT_SCENARIOS),
+                        default="normal")
     parser.add_argument("--output", type=Path, help="Report directory (run mode)")
     args = parser.parse_args()
     if args.mode == "run-all":
         output = args.output or Path(tempfile.mkdtemp(prefix="orderflow-fault-reports-"))
         output.mkdir(parents=True, exist_ok=True)
         summary = []
-        for scenario in SCENARIOS:
+        for scenario in (name for name in SCENARIOS if name not in MANAGEMENT_SCENARIOS):
             with Lab(scenario) as lab:
                 report = exercise(lab)
             destination = output / scenario

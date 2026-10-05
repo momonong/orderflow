@@ -46,3 +46,5 @@ uv run --locked python -m tools.fault_lab serve --scenario receipt_lost_after_co
 | `ai_401`、`ai_403`、`ai_429`、`ai_503`、`ai_timeout`、`ai_invalid` | 假上游實際透過 HTTP 回錯誤、超過 25 秒逾時或回無效結果；分辨 failed 與 unknown。 |
 
 本工具不修改正式站、HP／ASUS、Caddy、Tunnel、DNS、防火牆或憑證，也不連真實 Google。實驗只能驗證各種可觀察故障與安全恢復路徑，**不能據此斷定公司端的根因**。TLS MITM、真實企業政策、真實 Google 額度與內容品質，以及人工接受，都不在本機模擬證據內。
+
+管理流程的 PO／invoice、同鍵重送與金鑰過期案例請見[管理流程故障模擬紀錄](management-fault-lab-2026-10-05.md)。
