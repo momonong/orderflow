@@ -9,6 +9,8 @@ const state = {documents: [], jobs: [], drafts: [], recordSets: [], localSources
   pendingJobKeys: new Map(), page: "dashboard"};
 let keyFieldUsed = false;
 let keyWorkspaceShown = false;
+let authPending = false;
+let authGeneration = 0;
 function clearKeyInput() {
   const field = el("ai-key");
   field.value = "";
@@ -52,6 +54,7 @@ function safeError(error) {
   return parts.join(" · ");
 }
 async function api(path, options = {}, timeoutMs = 10000) {
+  const generation = authGeneration;
   const requestId = uuid();
   const started = Date.now();
   let appReached = false;
@@ -82,7 +85,7 @@ async function api(path, options = {}, timeoutMs = 10000) {
       responseType, requestId}; }
     diagnostics.record("json_parsed", path, {requestId, httpStatus: response.status});
     if (!response.ok) {
-      if (response.status === 401 && path !== "login") {
+      if (response.status === 401 && path !== "login" && generation === authGeneration) {
         const recordSave = path.startsWith("management/record-sets/");
         if (recordSave && !state.localPreview) state.pendingRecordEdit = {
           documentId: state.selected, jobId: state.job?.id, localSourceId: state.localSource?.id,
@@ -125,6 +128,7 @@ async function copyDiagnosticReport() {
   }
 }
 function showLogin(message = "請輸入網站密碼。", preserveEditor = false) {
+  authGeneration += 1;
   keyWorkspaceShown = false;
   el("startup").hidden = true; el("workspace").hidden = true; el("login").hidden = false;
   el("logout").hidden = true; el("password").value = ""; clearKeyInput();
@@ -184,14 +188,17 @@ function showWorkspace(data) {
   refreshControls();
 }
 async function load() {
+  const generation = authGeneration;
   el("startup").hidden = false; el("retry").hidden = true;
   status("startup-status", "正在確認登入及資料狀態。");
   try {
     const data = await api("management/bootstrap");
+    if (generation !== authGeneration) return;
     showWorkspace(data);
     await refreshShared();
   }
   catch (error) {
+    if (generation !== authGeneration) return;
     if (error.status === 401) {
       const preserve = !!(state.pendingRecordEdit || state.localPreview);
       showLogin(preserve ? "登入仍未完成；未存品項暫留在此頁。" : "請輸入網站密碼。", preserve);
@@ -462,11 +469,21 @@ async function pollJob(id) {
   finally { state.polling = null; }
 }
 async function login(event) {
-  event.preventDefault(); const password = el("password").value; el("password").value = "";
+  event.preventDefault();
+  if (authPending) return;
+  authPending = true; authGeneration += 1;
+  const password = el("password").value; el("password").value = "";
   el("login-button").disabled = true; status("login-status", "登入中…");
   try { await api("login", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password})}); await load(); }
   catch (error) { status("login-status", `登入失敗：${safeError(error)}`, "error"); }
-  finally { el("login-button").disabled = false; }
+  finally { authPending = false; el("login-button").disabled = false; }
+}
+async function logout() {
+  if (authPending) return;
+  authPending = true; authGeneration += 1; el("logout").disabled = true;
+  try { await api("logout", {method: "POST"}); showLogin("已登出。"); }
+  catch (error) { status("key-status", `登出未確認：${safeError(error)}。請重試。`, "unknown"); }
+  finally { authPending = false; el("logout").disabled = false; }
 }
 const localErrorMessages = {
   LOCAL_FILE_SIZE: "PDF 須大於 0 且不超過 8 MB。",
@@ -1246,10 +1263,7 @@ function chooseTypedFile(file, kind) {
 prepareKeyInput();
 el("login-form").addEventListener("submit", login);
 el("retry").addEventListener("click", load);
-el("logout").addEventListener("click", async () => {
-  try { await api("logout", {method: "POST"}); showLogin("已登出。"); }
-  catch (error) { status("key-status", `登出未確認：${safeError(error)}。請重試。`, "unknown"); }
-});
+el("logout").addEventListener("click", logout);
 el("pdf").addEventListener("change", () => { state.uploadFile = null; state.uploadKey = null; refreshControls(); });
 el("upload").addEventListener("click", upload);
 el("local-pdf").addEventListener("change", () => refreshControls());

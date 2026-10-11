@@ -283,22 +283,24 @@ class Store:
                        "expires_ms=excluded.expires_ms", (session_id, timestamp, expires))
         return session_id, token, expires
 
-    def deauthenticate(self, old_token: str | None) -> tuple[str | None, str | None]:
-        """Invalidate the privileged token and retain an unprivileged browser owner."""
+    def deauthenticate(self, old_token: str | None) -> str | None:
+        """Revoke authentication without replacing the browser's owner handle.
+
+        Logout must not depend on delivery or ordering of Set-Cookie responses.
+        The retained token grants no API access without session_auth; a later
+        password login rotates it, so stale logout cannot revoke that login.
+        """
         if not old_token:
-            return None, None
-        anonymous_token = secrets.token_urlsafe(32)
+            return None
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT id FROM sessions WHERE token_hash=?",
                              (self.token_digest(old_token),)).fetchone()
             if not row:
-                return None, None
+                return None
             session_id = row["id"]
-            db.execute("UPDATE sessions SET token_hash=? WHERE id=?",
-                       (self.token_digest(anonymous_token), session_id))
             db.execute("DELETE FROM session_auth WHERE session_id=?", (session_id,))
-        return session_id, anonymous_token
+        return session_id
 
     def session_expires(self, session_id: str) -> int:
         with self.db() as db:
@@ -1512,12 +1514,11 @@ class Handler(BaseHTTPRequestHandler):
         self.json_response(200, {"status": "ok", "auth_expires_ms": expires}, token)
 
     def logout(self) -> None:
-        session_id, token = self.server.store.deauthenticate(self.session_token())
+        session_id = self.server.store.deauthenticate(self.session_token())
         if session_id:
             self.server.clear_key(session_id)
-            self.json_response(200, {"status": "signed_out"}, token)
-        else:
-            self.json_response(200, {"status": "signed_out"}, clear_cookie=True)
+        # Even an unknown/stale token must not erase a newer tab's cookie.
+        self.json_response(200, {"status": "signed_out"})
 
     def do_POST(self) -> None:
         if not self.valid_host() or not self.valid_origin():

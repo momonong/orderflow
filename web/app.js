@@ -78,6 +78,7 @@ function showLogin(message = "請輸入網站登入密碼，才能查看測試�
 }
 async function login(event) {
   event.preventDefault();
+  if ($("login-button").disabled) return;
   const password = $("login-password").value;
   $("login-password").value = "";
   $("login-button").disabled = true;
@@ -94,6 +95,7 @@ async function login(event) {
   }
 }
 async function logout() {
+  if ($("logout-button").disabled) return;
   $("logout-button").disabled = true;
   try {
     await api("logout", {method: "POST"});

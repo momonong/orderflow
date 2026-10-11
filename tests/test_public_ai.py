@@ -464,13 +464,14 @@ class PublicAiTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=original)[0], 401)
         self.assertFalse(self.request("GET", "/orderflow/api/key", cookie=again)[1]["configured"])
         self.post_json("/orderflow/api/key", {"key": FAKE_KEY}, cookie=again)
-        status, _, anon_issued = self.request("POST", "/orderflow/api/logout", cookie=again)
+        status, _, logout_cookie = self.request("POST", "/orderflow/api/logout", cookie=again)
         self.assertEqual(status, 200)
-        anon = anon_issued.split(";", 1)[0]
-        self.assertNotEqual(again, anon)
-        for cookie in (original, again, anon):
+        self.assertIsNone(logout_cookie)
+        for cookie in (original, again):
             self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=cookie)[0], 401)
-        restored, _ = self.login(cookie=anon)
+        restored, _ = self.login(cookie=again)
+        self.assertNotEqual(restored, again)
+        self.assertEqual(self.request("GET", "/orderflow/api/bootstrap", cookie=again)[0], 401)
         bootstrap = self.request("GET", "/orderflow/api/bootstrap", cookie=restored)[1]
         self.assertEqual(bootstrap["documents"][0]["id"], doc["id"])
         self.assertFalse(bootstrap["ai_key_configured"])
@@ -480,6 +481,103 @@ class PublicAiTests(unittest.TestCase):
         self.assertIn("SameSite=Strict", issued)
         self.assertIn("Path=/orderflow/", issued)
         self.assertIn("Secure", issued)
+
+    def saved_auth_records(self):
+        """Synthetic persisted Invoice/PO; no adapter or external request is used."""
+        from test_management_records import row
+        owner = self.store.session(self.cookie.split("=", 1)[1])
+        for kind in ("purchase_order", "invoice"):
+            status, doc, _ = self.request("POST", "/orderflow/api/management/documents", PDF, {
+                "Content-Type": "application/pdf", "X-File-Size": str(len(PDF)),
+                "X-File-SHA256": hashlib.sha256(PDF).hexdigest(),
+                "X-Request-Key": str(uuid.uuid4()), "X-Document-Kind": kind,
+            }, self.cookie)
+            self.assertEqual(status, 201)
+            job, _ = self.store.add_job(owner, doc["id"], str(uuid.uuid4()), "real", "management")
+            self.store.set_job(job["id"], state="done", result=[])
+            status, _, _ = self.request("PUT", "/orderflow/api/management/record-sets/" + doc["id"],
+                json.dumps({"source_job_id": job["id"], "revision": 0, "rows": [row(kind)]}),
+                {"Content-Type": "application/json"}, self.cookie)
+            self.assertEqual(status, 201)
+        return owner, self.store.record_sets(owner)
+
+    def assert_auth_records_retained(self, cookie, owner, records):
+        self.assertEqual(self.store.session(cookie.split("=", 1)[1]), owner)
+        status, snapshot, _ = self.request("GET", "/orderflow/api/management/bootstrap", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(snapshot["record_sets"], records)
+        self.assertEqual(len(snapshot["jobs"]), 2, "no repeated AI or new jobs")
+        for doc in snapshot["documents"]:
+            self.assertEqual((self.store.files / (doc["id"] + ".pdf")).read_bytes(), PDF)
+
+    def test_duplicate_logout_retains_invoice_owner(self):
+        owner, records = self.saved_auth_records()
+        original = self.cookie
+        # Both tabs sent the same Cookie before either logout response arrived.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            replies = list(pool.map(lambda _: self.request("POST", "/orderflow/api/logout", cookie=original), range(2)))
+        self.assertEqual(self.store.record_sets(owner), records, "logout never deletes records")
+        for status, _, issued in replies:
+            self.assertEqual(status, 200)
+            self.assertIsNone(issued, "logout responses must not overwrite the browser owner")
+        restored, _ = self.login(cookie=original)
+        self.assert_auth_records_retained(restored, owner, records)
+
+    def test_lost_logout_response_retains_invoice_owner(self):
+        owner, records = self.saved_auth_records()
+        original = self.cookie
+        # The server commits logout; the client receives none of its headers.
+        self.assertEqual(self.request("POST", "/orderflow/api/logout", cookie=original)[0], 200)
+        self.assertEqual(self.request("GET", "/orderflow/api/management/bootstrap", cookie=original)[0], 401)
+        self.assertEqual(self.store.record_sets(owner), records)
+        restored, _ = self.login(cookie=original)
+        self.assert_auth_records_retained(restored, owner, records)
+
+    def test_delayed_logout_cannot_clear_new_login_or_other_owner(self):
+        owner, records = self.saved_auth_records()
+        original = self.cookie
+        # Hold the first logout response until after a new password login.
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=4)
+        conn.request("POST", "/orderflow/api/logout", headers={"Host": "momonong.me",
+                     "Origin": ORIGIN, "X-Orderflow-Request": "1", "Cookie": original})
+        deadline = time.monotonic() + 2
+        while self.store.session(original.split("=", 1)[1]) is not None:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        restored, _ = self.login(cookie=original)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Set-Cookie"))
+        response.read()
+        conn.close()
+        # A retry from an old tab cannot revoke the newly rotated login.
+        for cookie in (original, "of_session=unknown", ""):
+            status, _, issued = self.request("POST", "/orderflow/api/logout", cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIsNone(issued)
+            for path in ("api/bootstrap", "api/management/bootstrap", "api/integration/bootstrap"):
+                self.assertEqual(self.request("GET", "/orderflow/" + path, cookie=cookie)[0], 401)
+        self.assert_auth_records_retained(restored, owner, records)
+        other, _ = self.login(cookie="")
+        self.assertEqual(self.request("GET", "/orderflow/api/management/bootstrap", cookie=other)[1]["record_sets"], [])
+        for record in records:
+            path = "/orderflow/api/management/record-sets/" + record["document_id"]
+            self.assertEqual(self.request("GET", path, cookie=other)[0], 404)
+
+    def test_expired_invoice_owner_survives_reopen_but_missing_cookie_is_separate(self):
+        owner, records = self.saved_auth_records()
+        with self.store.db() as db:
+            db.execute("UPDATE session_auth SET expires_ms=0 WHERE session_id=?", (owner,))
+        self.assertEqual(self.request("GET", "/orderflow/api/management/bootstrap", cookie=self.cookie)[0], 401)
+        self.server.store = Store(Path(self.tmp.name))
+        restored, issued = self.login(cookie=self.cookie)
+        self.assert_auth_records_retained(restored, owner, records)
+        # Current contract is a session cookie, not cross-browser recovery.
+        self.assertNotIn("Max-Age", issued)
+        separate, _ = self.login(cookie="")
+        self.assertNotEqual(self.store.session(separate.split("=", 1)[1]), owner)
+        self.assertEqual(self.request("GET", "/orderflow/api/management/bootstrap", cookie=separate)[1]["record_sets"], [])
+        self.assertEqual(self.store.record_sets(owner), records)
 
     def test_expiry_blocks_data_and_clears_key(self):
         session_id = self.store.session(self.cookie.split("=", 1)[1])
