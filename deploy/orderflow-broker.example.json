@@ -1,0 +1,13 @@
+{
+  "token_file": null,
+  "endpoint": "http://127.0.0.1:18084",
+  "model": "gemini-3.5-flash-lite",
+  "max_pdf_bytes": 1048576,
+  "max_request_bytes": 2097152,
+  "max_result_bytes": 4194304,
+  "max_output_tokens": 8192,
+  "input_bound_verified": false,
+  "input_bound_evidence": null,
+  "input_bound_expires_at": null,
+  "timeout_seconds": 12.0
+}

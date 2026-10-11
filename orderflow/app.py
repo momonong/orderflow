@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import http.cookies
 import json
@@ -26,6 +27,8 @@ from pypdf import PdfReader
 
 from .ai import AIAdapter, AIError, AIUnknown, MockAdapter
 from .auth import BCRYPT_HASH, load_caddy_hash, verify_password
+from .broker import BrokerConfig, BrokerError, make_task
+from . import broker_jobs
 from .diagnostics import BUILD_ID, audit_event, client_report
 from .gemini import GeminiAdapter, MANAGEMENT_FIELDS, MODEL as GEMINI_MODEL
 from .records import KINDS, RecordRowsError, validate_rows
@@ -218,8 +221,10 @@ class Store:
                            rows_json,revision,created_ms,updated_ms FROM management_record_sets""")
                 db.execute("DROP TABLE management_record_sets")
                 db.execute("ALTER TABLE management_record_sets_new RENAME TO management_record_sets")
+            broker_jobs.migrate(db)
             db.execute("UPDATE jobs SET state='unknown', error_code='SERVER_RESTART', finished_ms=? "
-                       "WHERE state IN ('queued', 'running')", (now_ms(),))
+                       "WHERE state IN ('queued', 'running') "
+                       "AND id NOT IN (SELECT job_id FROM broker_jobs)", (now_ms(),))
         self.db_path.chmod(0o600)
         self.trial = TrialBook(self, pdf_page_count)
         self.shared = SharedLibrary(self, pdf_page_count, max_pdf_bytes=MAX_PDF_BYTES,
@@ -325,7 +330,7 @@ class Store:
 
     def document_info(self, session_id: str, document_id: str, purpose: str) -> dict | None:
         with self.db() as db:
-            row = db.execute("SELECT id,document_kind,sha256 FROM documents "
+            row = db.execute("SELECT id,document_kind,sha256,size FROM documents "
                              "WHERE id=? AND session_id=? AND purpose=?",
                              (document_id, session_id, purpose)).fetchone()
         return dict(row) if row else None
@@ -341,13 +346,36 @@ class Store:
                               "ORDER BY j.created_ms DESC", (session_id, session_id, purpose)).fetchall()
         return [self.public_job(row) for row in rows]
 
-    @staticmethod
-    def public_job(row: sqlite3.Row) -> dict:
+    def public_job(self, row: sqlite3.Row) -> dict:
         item = dict(row)
         item["result"] = json.loads(item["result"]) if item["result"] else None
         item["steps"] = json.loads(item["steps"])
         item["mode"] = "real" if item["scenario"] == "real" else "mock"
+        with self.db() as db:
+            broker = broker_jobs.public_metadata(db, item["id"])
+        item["execution_mode"] = "broker" if broker else "direct" if item["scenario"] == "real" else "mock"
+        if broker:
+            item["broker"] = broker
         return item
+
+    def existing_job(self, session_id: str, document_id: str, request_key: str,
+                     purpose: str, *, protect_direct: bool = False,
+                     new_attempt: bool = False) -> dict | None:
+        """Recover original work even when a browser lost its POST receipt/key.
+
+        Completed Broker work may be repeated only as an explicit new attempt.
+        A direct unknown/running job also blocks changing its execution route.
+        """
+        with self.db() as db:
+            row = db.execute("SELECT j.id FROM jobs j JOIN documents d ON d.id=j.document_id "
+                             "WHERE j.session_id=? AND d.session_id=? AND d.id=? AND d.purpose=? "
+                             "AND (j.request_key=? OR EXISTS(SELECT 1 FROM broker_jobs b WHERE b.job_id=j.id "
+                             "AND (b.phase!='complete' OR NOT ?)) "
+                             "OR (? AND j.scenario='real' AND j.state IN ('queued','running','unknown'))) "
+                             "ORDER BY (j.request_key=?) DESC,j.created_ms DESC LIMIT 1",
+                             (session_id, session_id, document_id, purpose, request_key, new_attempt,
+                              protect_direct, request_key)).fetchone()
+        return self.job(session_id, row["id"], purpose) if row else None
 
     def job(self, session_id: str, job_id: str, purpose: str = "diagnostic") -> dict | None:
         if purpose not in PURPOSES:
@@ -457,7 +485,9 @@ class Store:
         return result
 
     def add_job(self, session_id: str, document_id: str, request_key: str,
-                scenario: str, purpose: str = "diagnostic") -> tuple[dict, bool]:
+                scenario: str, purpose: str = "diagnostic", *,
+                broker_plan: tuple[dict, BrokerConfig] | None = None,
+                new_attempt: bool = False) -> tuple[dict, bool]:
         if purpose not in PURPOSES or purpose == "management" and scenario != "real":
             raise ValueError("invalid purpose/scenario")
         with self.db() as db:
@@ -474,6 +504,17 @@ class Store:
                 if existing["scenario"] != scenario:
                     raise ValueError("IDEMPOTENCY_CONFLICT")
                 return self.public_job(existing), False
+            # This check is in the same write transaction as job+mapping creation;
+            # concurrent browser requests with different keys cannot double-submit.
+            if scenario == "real":
+                guarded = db.execute("SELECT j.id FROM jobs j WHERE j.document_id=? AND j.session_id=? "
+                                     "AND (EXISTS(SELECT 1 FROM broker_jobs b WHERE b.job_id=j.id "
+                                     "AND (b.phase!='complete' OR NOT ?)) "
+                                     "OR (? AND j.scenario='real' AND j.state IN ('queued','running','unknown'))) "
+                                     "ORDER BY j.created_ms DESC LIMIT 1",
+                                     (document_id, session_id, new_attempt, bool(broker_plan))).fetchone()
+                if guarded:
+                    return self.job(session_id, guarded["id"], purpose), False
             attempt = db.execute("SELECT COUNT(*) FROM jobs WHERE document_id=?", (document_id,)).fetchone()[0] + 1
             if self.public_limits and attempt > MAX_JOBS_PER_DOCUMENT:
                 raise ValueError("JOB_LIMIT")
@@ -483,10 +524,16 @@ class Store:
                        (job_id, session_id, document_id, request_key, attempt, scenario,
                         "queued", None, None, json.dumps({"ai": "not_run", "format": "not_run"}),
                         timestamp, None, None))
+            if broker_plan:
+                task, config = broker_plan
+                broker_jobs.insert(db, job_id, session_id, document_id, task, config)
         return {"id": job_id, "document_id": document_id, "attempt": attempt,
                 "scenario": scenario, "state": "queued", "error_code": None, "result": None,
                 "steps": {"ai": "not_run", "format": "not_run"}, "created_ms": timestamp,
-                "started_ms": None, "finished_ms": None, "mode": "real" if scenario == "real" else "mock"}, True
+                "started_ms": None, "finished_ms": None, "mode": "real" if scenario == "real" else "mock",
+                "execution_mode": "broker" if broker_plan else "direct" if scenario == "real" else "mock",
+                **({"broker": {"phase": "prepared", "gateway_state": None, "finish_reason": None,
+                               "response_truncated": None, "usage_unknown": True}} if broker_plan else {})}, True
 
     @staticmethod
     def public_draft(row: sqlite3.Row) -> dict:
@@ -949,7 +996,8 @@ class AppServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], store: Store, public_origin: str | None,
-                 auth_hash: bytes):
+                 auth_hash: bytes, *, broker_config: BrokerConfig | None = None,
+                 broker_client_factory=None):
         if address[0] != "127.0.0.1":
             raise ValueError("OrderFlow must bind to 127.0.0.1")
         if public_origin:
@@ -978,6 +1026,29 @@ class AppServer(ThreadingHTTPServer):
         self.key_stopping = False
         self.key_sweeper = threading.Thread(target=self._expire_keys, daemon=True)
         self.key_sweeper.start()
+        self.broker_config = broker_config
+        self.broker_worker = None
+        if not broker_config:
+            # Explicit direct configuration never redirects saved Broker work.
+            # Make paused reconciliation visible until its original binding returns.
+            with store.db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("UPDATE jobs SET state='unknown',error_code='BROKER_MODE_INACTIVE' "
+                           "WHERE id IN (SELECT job_id FROM broker_jobs "
+                           "WHERE phase NOT IN ('complete','failed','expired'))")
+        if broker_config:
+            kwargs = {"client_factory": broker_client_factory} if broker_client_factory else {}
+            self.broker_worker = broker_jobs.BrokerJobs(
+                store, broker_config,
+                lambda raw, kind: validate_management_result(raw) if kind in KINDS else validate_result(raw),
+                **kwargs)
+            self.broker_worker.start()
+
+    def recognition_status(self) -> dict:
+        if self.broker_config:
+            return self.broker_config.public_status()
+        return {"mode": "direct", "model": GEMINI_MODEL, "ready": True,
+                "max_pdf_bytes": MAX_PDF_BYTES, "max_output_tokens": None, "unavailable_code": None}
 
     def allow_login_attempt(self) -> bool:
         now = time.monotonic()
@@ -1042,6 +1113,8 @@ class AppServer(ThreadingHTTPServer):
         self.key_wakeup.set()
 
     def server_close(self) -> None:
+        if self.broker_worker:
+            self.broker_worker.close()
         with self.key_lock:
             self.key_stopping = True
             self.keys.clear()
@@ -1331,7 +1404,8 @@ class Handler(BaseHTTPRequestHandler):
                                      "mode": "mock-and-real", "documents": self.server.store.documents(session_id),
                                      "jobs": self.server.store.jobs(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
-                                     "ai_model": GEMINI_MODEL,
+                                     "ai_model": self.server.recognition_status()["model"],
+                                     "recognition": self.server.recognition_status(),
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
             return
         if path == PREFIX + "api/management/bootstrap":
@@ -1345,7 +1419,8 @@ class Handler(BaseHTTPRequestHandler):
                                      "record_sets": self.server.store.record_sets(session_id),
                                      "local_sources": self.server.store.local_sources(session_id),
                                      "ai_key_configured": self.server.get_key(session_id) is not None,
-                                     "ai_model": GEMINI_MODEL,
+                                     "ai_model": self.server.recognition_status()["model"],
+                                     "recognition": self.server.recognition_status(),
                                      "auth_expires_ms": self.server.store.session_expires(session_id)})
             return
         if path == PREFIX + "api/integration/bootstrap":
@@ -1657,6 +1732,9 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(201, product)
             return
         if path == PREFIX + "api/key":
+            if self.server.broker_config:
+                self.error(409, "BROKER_MODE_ACTIVE")
+                return
             value = self.get_json()
             if value is None:
                 return
@@ -1671,6 +1749,9 @@ class Handler(BaseHTTPRequestHandler):
                                      "expires_in_seconds": KEY_TTL_SECONDS})
             return
         if path == PREFIX + "api/key/check":
+            if self.server.broker_config:
+                self.error(409, "BROKER_MODE_ACTIVE")
+                return
             key = self.server.get_key(session_id)
             if not key:
                 self.error(409, "KEY_REQUIRED")
@@ -1740,15 +1821,54 @@ class Handler(BaseHTTPRequestHandler):
                 return
             document_id, key, scenario = (value.get(name) for name in ("document_id", "request_key", "scenario"))
             if (not valid_uuid(document_id) or not valid_uuid(key) or scenario not in SCENARIOS
+                    or type(value.get("new_attempt", False)) is not bool
                     or purpose == "management" and scenario != "real"):
                 self.error(400, "BAD_JOB_REQUEST")
                 return
+            if scenario == "real":
+                existing = self.server.store.existing_job(
+                    session_id, document_id, key, purpose,
+                    protect_direct=self.server.broker_config is not None,
+                    new_attempt=value.get("new_attempt", False))
+                if existing:
+                    if existing["scenario"] != scenario:
+                        self.error(409, "IDEMPOTENCY_CONFLICT")
+                    else:
+                        self.json_response(200, existing)
+                    return
+            broker_plan = None
+            if scenario == "real" and self.server.broker_config:
+                document = self.server.store.document_info(session_id, document_id, purpose)
+                if not document:
+                    self.error(404, "DOCUMENT_NOT_FOUND")
+                    return
+                try:
+                    config = self.server.broker_config
+                    if document["size"] > config.max_pdf_bytes:
+                        raise BrokerError("BROKER_PDF_TOO_LARGE")
+                    readiness = config.public_status()
+                    if not readiness["ready"]:
+                        raise BrokerError(readiness["unavailable_code"])
+                    pdf_bytes = (self.server.store.files / f"{document_id}.pdf").read_bytes()
+                    if hashlib.sha256(pdf_bytes).hexdigest() != document["sha256"]:
+                        raise BrokerError("BROKER_BAD_REQUEST")
+                    task = make_task(config, pdf_bytes, document.get("document_kind"),
+                                     "orderflow-" + uuid.uuid4().hex)
+                    broker_plan = (task, config)
+                except BrokerError as exc:
+                    self.error(409, exc.code)
+                    return
+                except OSError:
+                    self.error(409, "DOCUMENT_NOT_FOUND")
+                    return
             ai_key = self.server.get_key(session_id) if scenario == "real" else None
-            if scenario == "real" and not ai_key:
+            if scenario == "real" and not broker_plan and not ai_key:
                 self.error(409, "KEY_REQUIRED")
                 return
             try:
-                job, created = self.server.store.add_job(session_id, document_id, key, scenario, purpose)
+                job, created = self.server.store.add_job(
+                    session_id, document_id, key, scenario, purpose, broker_plan=broker_plan,
+                    new_attempt=value.get("new_attempt", False))
             except LookupError:
                 self.error(404, "DOCUMENT_NOT_FOUND")
                 return
@@ -1758,7 +1878,9 @@ class Handler(BaseHTTPRequestHandler):
                            "JOB_LIMIT" if code == "JOB_LIMIT" else "IDEMPOTENCY_CONFLICT")
                 return
             self.audit_commit(created, job["id"])
-            if created:
+            if created and broker_plan:
+                self.server.broker_worker.wakeup.set()
+            elif created:
                 document = self.server.store.document_info(session_id, document_id, purpose)
                 document_kind = document["document_kind"] if purpose == "management" else None
                 adapter = (GeminiAdapter(ai_key, document_kind) if scenario == "real"
@@ -2028,6 +2150,11 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=ROOT / ".local-data")
     parser.add_argument("--public-origin", help="HTTPS origin allowed through a same-host loopback proxy")
     parser.add_argument("--auth-file", type=Path, help="Caddy bcrypt credential file for local testing")
+    parser.add_argument("--recognition-mode", choices=("direct", "broker"), default="direct")
+    parser.add_argument("--broker-config", type=Path,
+                        help="Backend-only JSON Broker configuration, no credential values")
+    parser.add_argument("--broker-token-file", type=Path,
+                        help="Protected systemd client credential path, never a token value")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         parser.error("This PoC is loopback-only; public access requires a separate security decision")
@@ -2039,7 +2166,20 @@ def main() -> None:
         auth_hash = load_caddy_hash(auth_file)
     except (OSError, ValueError):
         parser.error("login credential unavailable or invalid")
-    server = AppServer((args.host, args.port), Store(args.data_dir), args.public_origin, auth_hash)
+    broker_config = None
+    if args.recognition_mode == "broker":
+        if not args.broker_config:
+            parser.error("broker configuration required")
+        try:
+            broker_config = BrokerConfig.from_snapshot(json.loads(args.broker_config.read_text()))
+            if args.broker_token_file:
+                broker_config = replace(broker_config, token_file=args.broker_token_file)
+        except (OSError, ValueError, TypeError, BrokerError):
+            parser.error("broker configuration unavailable or invalid")
+    elif args.broker_config or args.broker_token_file:
+        parser.error("broker configuration requires explicit broker recognition mode")
+    server = AppServer((args.host, args.port), Store(args.data_dir), args.public_origin, auth_hash,
+                       broker_config=broker_config)
     print(f"OrderFlow {VERSION} at http://{args.host}:{server.server_port}{PREFIX}")
     try:
         server.serve_forever()

@@ -35,7 +35,9 @@ function page() {
 (async () => {
   const delayed = page();
   delayed.element('ai-key').value = 'synthetic-browser-fill';
-  delayed.context.api = () => new Promise((resolve) => { delayed.context.finishBootstrap = resolve; });
+  delayed.context.api = path => path === 'bootstrap'
+    ? new Promise((resolve) => { delayed.context.finishBootstrap = resolve; })
+    : Promise.resolve({status: 200, data: {documents: []}});
   const waiting = vm.runInContext('initialize()', delayed.context);
   assert.equal(delayed.element('startup-section').hidden, false);
   assert.equal(delayed.element('login-section').hidden, true);

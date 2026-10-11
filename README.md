@@ -63,3 +63,5 @@ node --check web/manage.js
 ```
 
 測試涵蓋同站 API、PDF 邊界及持久化、公開來源限制、金鑰隔離/清除/重啟、固定模型請求格式、Google 錯誤碼、模擬與可控 stub 工作。沒有真實金鑰時，**不能宣稱 Google API 或 PDF 辨識實測通過**；公司瀏覽器及資料外傳許可也需由使用者確認。
+
+Broker 接入的本機候選、配置與保資料部署流程見 [Broker 接入候選](docs/broker-integration.md)。目前正式 PDF input bound 缺失、配置預設拒送；尚未部署、未執行新 PDF live 或取得使用者驗收。

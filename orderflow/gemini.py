@@ -109,6 +109,28 @@ def _generate(key: str, parts: list[dict], *, timeout: float, structured: bool,
         raise AIError("AI_BAD_RESPONSE") from None
 
 
+def recognition_prompt(document_kind: str | None) -> tuple[str, dict]:
+    """Return the established recognition prompt and provider-neutral schema source."""
+    if document_kind in {"purchase_order", "invoice"}:
+        role = ("This is a purchase order. Find the buyer only if the document clearly identifies it."
+                if document_kind == "purchase_order" else
+                "This is an invoice. Find the billed customer only if the document clearly identifies it; "
+                "a Company label may identify the issuer instead.")
+        prompt = (role + " Extract every line item into items with orderNo or invoiceNo, client, "
+                  "product, code, qty, unitPrice, amount, currency, date, incoterms and unit. "
+                  "Keep product spelling, special characters and internal whitespace. "
+                  "Use decimal strings for quantities and money. Omit any field not supported "
+                  "by the PDF; never infer customer, currency, date, zero, unit or shipment. "
+                  "Reply in JSON only. Use an empty items array when no items are visible.")
+        schema = MANAGEMENT_SCHEMA
+    else:
+        prompt = ("Extract line items from this PDF. Return an items array with each item's "
+                  "description and nonnegative integer quantity. Do not invent missing items; "
+                  "use an empty array if none are visible. Reply in JSON only.")
+        schema = ITEM_SCHEMA
+    return prompt, schema
+
+
 class GeminiAdapter:
     def __init__(self, key: str, document_kind: str | None = None):
         self._key = key
@@ -121,23 +143,7 @@ class GeminiAdapter:
 
     def recognize(self, pdf_path: str, *, deadline_seconds: float) -> object:
         data = Path(pdf_path).read_bytes()
-        if self.document_kind in {"purchase_order", "invoice"}:
-            role = ("This is a purchase order. Find the buyer only if the document clearly identifies it."
-                    if self.document_kind == "purchase_order" else
-                    "This is an invoice. Find the billed customer only if the document clearly identifies it; "
-                    "a Company label may identify the issuer instead.")
-            prompt = (role + " Extract every line item into items with orderNo or invoiceNo, client, "
-                      "product, code, qty, unitPrice, amount, currency, date, incoterms and unit. "
-                      "Keep product spelling, special characters and internal whitespace. "
-                      "Use decimal strings for quantities and money. Omit any field not supported "
-                      "by the PDF; never infer customer, currency, date, zero, unit or shipment. "
-                      "Reply in JSON only. Use an empty items array when no items are visible.")
-            schema = MANAGEMENT_SCHEMA
-        else:
-            prompt = ("Extract line items from this PDF. Return an items array with each item's "
-                      "description and nonnegative integer quantity. Do not invent missing items; "
-                      "use an empty array if none are visible. Reply in JSON only.")
-            schema = ITEM_SCHEMA
+        prompt, schema = recognition_prompt(self.document_kind)
         text = _generate(self._key, [
             {"text": prompt},
             {"inline_data": {"mime_type": "application/pdf", "data": base64.b64encode(data).decode("ascii")}},

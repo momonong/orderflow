@@ -14,7 +14,7 @@
     <header>
       <p class="eyebrow">OrderFlow · 示範測試</p>
       <h1>試試 PDF 能否上傳並顯示結果</h1>
-      <p>照下面 4 個步驟操作，就能知道測試走到哪裡。<strong>模擬測試使用固定範例；真正辨識需另外設定金鑰，並確認把 PDF 送給 Google。</strong></p>
+      <p>照下面 4 個步驟操作，就能知道測試走到哪裡。<strong>模擬測試使用固定範例；真正辨識由網站提供或使用個人金鑰，並需確認把 PDF 送給 Google。</strong></p>
     </header>
     <section id="startup-section" aria-labelledby="startup-title" role="status">
       <h2 id="startup-title">正在確認網站狀態</h2>
@@ -79,6 +79,8 @@
       <div class="table-wrap"><table><thead><tr><th>品項</th><th>數量</th></tr></thead><tbody id="result-body"></tbody></table></div>
       <div class="real-ai">
         <h3>若要測真正的 PDF 辨識</h3>
+        <p id="recognition-status" class="status" role="status"></p>
+        <div id="direct-key-settings">
         <p id="key-help"><strong>Google AI Studio API key 不是網站密碼。</strong>請從 AI Studio 複製金鑰。金鑰只暫存在網站主機記憶體，15 分鐘後失效；不會寫入報告或資料庫。輸入形式通過不代表有效；文字連線檢查可確認權限與額度，可能使用 API 額度。</p>
         <label for="ai-key">Google AI Studio API key</label>
         <input id="ai-key" name="gemini-api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="key-help" readonly>
@@ -87,9 +89,11 @@
         <p id="key-status" class="status" role="status">尚未設定金鑰；仍可使用上方模擬測試。</p>
         <button id="check-key" type="button" disabled>先測文字連線</button>
         <p id="check-status" class="status" role="status">文字測試只確認金鑰、模型與連線，不能證明 PDF 辨識成功。</p>
-        <p class="privacy-note"><strong>真正辨識會把這份 PDF 傳給 Google，可能使用你的 API 額度。</strong>請只使用已獲准外傳、沒有客戶或個資的測試文件；每次辨識都需另外確認。</p>
-        <button id="real-button" type="button" disabled>把這份 PDF 交給 Google 辨識</button>
+        </div>
+        <p class="privacy-note"><strong>真正辨識會把這份 PDF 傳給 Google，可能使用 API 額度。</strong>請只使用已獲准外傳、沒有客戶或個資的測試文件；每次辨識都需另外確認。</p>
+        <button id="real-button" type="button" disabled>送交 Google AI 辨識</button>
         <p id="real-status" class="status" role="status">請先上傳測試 PDF 並設定金鑰。</p>
+        <button id="refresh-job" type="button" hidden>查詢原辨識工作</button>
       </div>
       <details id="advanced-tests">
         <summary>進階：模擬失敗或重新測試</summary>

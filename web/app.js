@@ -30,6 +30,7 @@ let basicOk = false;
 let uploadUnknown = false;
 let jobSubmitUnknown = false;
 let aiKeyConfigured = false;
+let recognitionConfig = {mode: "direct", ready: true, max_pdf_bytes: 8 * 1024 * 1024};
 let keyBusy = false;
 let keyFieldUsed = false;
 let keyWorkspaceShown = false;
@@ -74,6 +75,7 @@ function showLogin(message = "請輸入網站登入密碼，才能查看測試�
   currentDocument = null;
   currentJob = null;
   aiKeyConfigured = false;
+  recognitionConfig = {mode: "direct", ready: false, max_pdf_bytes: null};
   setStatus("login-status", message);
 }
 async function login(event) {
@@ -113,11 +115,59 @@ function setStatus(id, message, state = "") {
 }
 function nextStep(message) { $("next-step").textContent = message; }
 function reportReady() { $("report-section").classList.add("ready"); }
+function recognitionIssue(doc) {
+  if (!["broker", "direct"].includes(recognitionConfig.mode) || !recognitionConfig.ready)
+    return "AI 辨識尚未設定完成，請聯絡提供網站的人。仍可上傳 PDF 及使用模擬測試。";
+  if (!Number.isSafeInteger(recognitionConfig.max_pdf_bytes) || recognitionConfig.max_pdf_bytes < 1)
+    return "辨識的 PDF 上限尚未確認，請聯絡提供連結的人。";
+  if (doc && (!Number.isSafeInteger(doc.size) || doc.size > recognitionConfig.max_pdf_bytes))
+    return `這份 PDF 超過辨識上限 ${pdfCap(recognitionConfig.max_pdf_bytes)}；仍可保留上傳檔案。`;
+  if (recognitionConfig.mode === "direct" && !aiKeyConfigured) return "請先設定 Google AI Studio 金鑰才能真正辨識。";
+  return null;
+}
+function pdfCap(size) { return `${Number((size / (1024 * 1024)).toFixed(3))} MiB`; }
+function brokerLocked(job) {
+  return job?.execution_mode === "broker" && !(job.state === "done" && job.broker?.phase === "complete" &&
+    job.broker?.response_truncated !== true && !job.error_code);
+}
+function completedBrokerJob(documentId) {
+  return jobs.some(job => job.document_id === documentId && job.execution_mode === "broker" && !brokerLocked(job));
+}
+function brokerJobMessage(job) {
+  if (job.execution_mode !== "broker") return null;
+  if (job.broker?.response_truncated === true || job.error_code === "BROKER_RESULT_INCOMPLETE")
+    return "辨識回應不完整，無法採用為品項。請查詢原工作或聯絡提供連結的人；不會自動重送。";
+  if (job.broker?.phase === "expired" || job.error_code === "BROKER_RESULT_EXPIRED")
+    return "辨識結果已到期，目前無法取得內容。請聯絡提供連結的人；不會自動重送或改用個人金鑰。";
+  if (job.state === "unknown" || job.broker?.phase === "unknown")
+    return "辨識結果未知，請求可能已送達並使用額度。請查詢原辨識工作；不會自動建立新工作或改用個人金鑰。";
+  if (["prepared", "submitting"].includes(job.broker?.phase)) return "正在送交 AI 辨識，請稍候。";
+  if (job.broker?.phase === "pending" || ["queued", "running"].includes(job.state))
+    return "辨識工作已排隊，正在查詢原工作的結果，請勿重複送出。";
+  if (job.state === "done") return "辨識完成。請人工核對內容，再複製測試報告。";
+  return "辨識未完成。請複製報告並聯絡提供連結的人；不會自動重試。";
+}
+function renderRecognitionConfig() {
+  const broker = recognitionConfig.mode === "broker";
+  $("direct-key-settings").hidden = broker;
+  if (broker) clearKeyInput();
+  $("real-button").textContent = completedBrokerJob(currentDocument?.id) ? "再次辨識（需確認）" : "送交 Google AI 辨識";
+  const cap = Number.isSafeInteger(recognitionConfig.max_pdf_bytes)
+    ? `單檔辨識上限 ${pdfCap(recognitionConfig.max_pdf_bytes)}；上傳上限仍為 ${pdfCap(maxBytes)}。` : "";
+  const issue = recognitionIssue(currentDocument);
+  setStatus("recognition-status", `${broker ? "網站提供的 AI 辨識，不必填入個人 API 金鑰。" : "使用個人 AI Studio 金鑰。"}${cap}${issue || ""}`,
+    issue ? "unknown" : "pass");
+}
 function updateRealControls() {
-  $("clear-key").disabled = !aiKeyConfigured || keyBusy;
-  $("check-key").disabled = !aiKeyConfigured || keyBusy;
-  $("real-button").disabled = !aiKeyConfigured || !currentDocument || jobBusy || jobSubmitUnknown
+  renderRecognitionConfig();
+  $("save-key").disabled = recognitionConfig.mode !== "direct" || keyBusy;
+  $("clear-key").disabled = recognitionConfig.mode !== "direct" || !aiKeyConfigured || keyBusy;
+  $("check-key").disabled = recognitionConfig.mode !== "direct" || !aiKeyConfigured || keyBusy;
+  $("real-button").disabled = !!recognitionIssue(currentDocument) || !currentDocument || jobBusy || jobSubmitUnknown
+    || jobs.some(job => job.document_id === currentDocument.id && brokerLocked(job))
     || (!!currentJob && ["queued", "running", "unknown"].includes(currentJob.state));
+  $("refresh-job").hidden = !currentJob || currentJob.state === "done" && !brokerLocked(currentJob);
+  $("refresh-job").disabled = jobBusy;
 }
 function keyAdvice(code) {
   if (code === "AI_AUTH_FAILED") return "金鑰無效或沒有權限。請在 AI Studio 核對後重新設定。";
@@ -218,7 +268,10 @@ const reportCodes = new Set(["BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIME
   "PDF_INVALID", "PDF_REQUIRED", "BAD_SIZE", "FILE_TOO_LARGE", "STORAGE_LIMIT",
   "UPLOAD_BUSY", "HASH_MISMATCH", "SIZE_MISMATCH", "PDF_CHECK_TIMEOUT",
   "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "SESSION_EXPIRED",
-  "SHARED_NOT_FOUND", "SHARED_FILE_UNAVAILABLE", "SHARED_REQUEST_INVALID"]);
+  "SHARED_NOT_FOUND", "SHARED_FILE_UNAVAILABLE", "SHARED_REQUEST_INVALID",
+  "BROKER_INPUT_BOUND_REQUIRED", "BROKER_PDF_TOO_LARGE", "BROKER_REQUEST_TOO_LARGE",
+  "BROKER_CONFIG_INVALID", "BROKER_CONFIG_CHANGED", "BROKER_HTTP_UNKNOWN", "BROKER_BAD_RESPONSE",
+  "BROKER_CONFLICT", "BROKER_UNAUTHORIZED", "BROKER_REJECTED", "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE"]);
 function reportUuid(value) {
   return typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
@@ -298,9 +351,14 @@ function updateReport() {
     `文件來源：${currentDocument?.source_type === "shared" ? "共用 PDF 副本" :
       currentDocument ? "我的 PDF（本次是否上傳見下方步驟）" : "未選擇"}`,
     `工作識別：${reportUuid(currentJob?.id)}`,
-    `辨識模式：${currentJob?.mode === "real" ? "Google Gemini PDF 請求；內容仍需人工核對" : "固定資料模擬"}`,
+    `辨識模式：${currentJob?.execution_mode === "broker" ? "Broker Google PDF 請求；內容仍需人工核對" : currentJob?.mode === "real" ? "Google Gemini PDF 請求；內容仍需人工核對" : "固定資料模擬"}`,
     "步驟："
   ];
+  if (currentJob?.execution_mode === "broker") {
+    const phase = ["prepared", "submitting", "pending", "unknown", "complete", "failed", "expired"].includes(currentJob.broker?.phase)
+      ? currentJob.broker.phase : "unknown";
+    lines.splice(-1, 0, `Broker 階段：${phase}`, `Broker 用量：${currentJob.broker?.usage_unknown ? "未知" : "請由服務端確認"}`);
+  }
   for (const name of names) {
     const entry = steps[name];
     const extras = [];
@@ -320,7 +378,7 @@ function updateReport() {
     lines.push(`- ${titles[name]}：${labels[entry.status]}${extras.length ? "（" + extras.join("，") + "）" : ""}`);
   }
   lines.push(diagnostics.summary());
-  lines.push("限制：Google 模型可用性依金鑰；辨識內容需人工核對。公司瀏覽器與資料外傳許可尚未驗證。網站無法載入時請由人提供錯誤截圖與時間。");
+  lines.push("限制：辨識服務可用性仍需實際確認；辨識內容需人工核對。公司瀏覽器與資料外傳許可尚未驗證。網站無法載入時請由人提供錯誤截圖與時間。");
   $("report").value = lines.join("\n");
 }
 function renderDocuments() {
@@ -406,7 +464,7 @@ function selectDocument(doc) {
   setStatus("upload-status", uploadedNow ? "本次瀏覽器上傳完成。" :
     doc.source_type === "shared" ? "已選用共用 PDF；本次瀏覽器上傳尚未測試。" :
     "已選取歷史 PDF；本次瀏覽器上傳尚未測試。", uploadedNow ? "pass" : "");
-  setStatus("real-status", aiKeyConfigured ? "可以按下方按鈕開始真正辨識。" : "請先設定金鑰才能開始真正辨識。");
+  setStatus("real-status", recognitionIssue(doc) || "可以按下方按鈕開始真正辨識。");
   mark("upload", uploadedNow ? "pass" : "not_run");
   mark("shared", claimedNow ? "pass" : "not_run");
   mark("integrity", "pass");
@@ -414,15 +472,15 @@ function selectDocument(doc) {
   else {
     renderRows($("result-body"), []);
     $("result-mode").textContent = "尚未產生結果。";
-    setStatus("ai-status", "已上傳。可先試模擬測試，或設定金鑰後試真正辨識。");
-    nextStep("現在可按步驟 3 的模擬測試，或設定金鑰後試真正辨識。");
+    setStatus("ai-status", "已上傳。可先試模擬測試，再依下方辨識方式與限制確認真正辨識。");
+    nextStep("現在可按步驟 3 的模擬測試，或查看下方真正辨識的方式與限制。");
     updateReport();
   }
 }
 function showJob(job) {
   currentJob = job;
   $("recognize-button").disabled = true;
-  $("rerun-button").disabled = jobBusy || ["queued", "running", "unknown"].includes(job.state);
+  $("rerun-button").disabled = jobBusy || brokerLocked(job) || ["queued", "running", "unknown"].includes(job.state);
   updateRealControls();
   const kind = job.mode === "real" ? "Google PDF 辨識" : "模擬測試";
   $("result-mode").textContent = job.mode === "real"
@@ -433,14 +491,14 @@ function showJob(job) {
     upstreamStatus: job.steps.upstream_http_status,
     upstreamReason: safeUpstreamReason(job.steps.upstream_reason)});
   mark("format", job.steps.format || "not_run");
-  if (job.state === "done") {
+  if (job.state === "done" && !brokerLocked(job)) {
     try {
       if (!Array.isArray(job.result)) throw new Error("format");
       renderRows($("result-body"), job.result);
       mark("render", "pass");
-      setStatus("ai-status", job.mode === "real"
+      setStatus("ai-status", brokerJobMessage(job) || (job.mode === "real"
         ? "Google 回傳的 PDF 品項已顯示；請人工核對內容。下一步：複製測試報告。"
-        : "範例結果已顯示。這些品項與你的 PDF 內容無關。下一步：複製測試報告。", "pass");
+        : "範例結果已顯示。這些品項與你的 PDF 內容無關。下一步：複製測試報告。"), "pass");
       nextStep(`${kind}已完成。請核對品項，再到步驟 4 複製報告。`);
       diagnostics.record("job_rendered", "jobs/" + job.id);
     } catch {
@@ -454,14 +512,14 @@ function showJob(job) {
     renderRows($("result-body"), []);
     mark("render", "not_run");
     if (["queued", "running"].includes(job.state)) {
-      setStatus("ai-status", `正在進行${kind}，請稍候，不需要再按一次。`, "working");
+      setStatus("ai-status", brokerJobMessage(job) || `正在進行${kind}，請稍候，不需要再按一次。`, "working");
       nextStep(`正在進行${kind}，請稍候。`);
     } else if (job.state === "unknown") {
-      setStatus("ai-status", "結果還不能確定。請稍後重新整理頁面查看；不要立刻重做。若仍不清楚，請複製報告傳回提供連結的人。", "unknown");
+      setStatus("ai-status", brokerJobMessage(job) || "結果還不能確定。請稍後重新整理頁面查看；不要立刻重做。若仍不清楚，請複製報告傳回提供連結的人。", "unknown");
       nextStep("結果尚不確定。稍後重新整理；必要時到步驟 4 複製報告。");
     } else {
-      setStatus("ai-status", job.mode === "real" && job.error_code
-        ? keyAdvice(job.error_code) : `${kind}沒有完成。請複製報告傳回提供連結的人。`, "fail");
+      setStatus("ai-status", brokerJobMessage(job) || (job.mode === "real" && job.error_code
+        ? keyAdvice(job.error_code) : `${kind}沒有完成。請複製報告傳回提供連結的人。`), "fail");
       nextStep(`${kind}未完成。請到步驟 4 複製報告。`);
     }
   }
@@ -581,7 +639,20 @@ async function pollJob(id) {
   nextStep("結果尚不確定。稍後重新整理；必要時到步驟 4 複製報告。");
   reportReady();
 }
+async function queryOriginalJob() {
+  const id = currentJob?.id;
+  if (!id || jobBusy) return;
+  jobBusy = true; updateRealControls();
+  try {
+    const response = await api("jobs/" + id, {}, 4000);
+    jobs = [response.data, ...jobs.filter(job => job.id !== id)];
+    if (currentJob?.id === id) showJob(response.data);
+  } catch (error) {
+    if (currentJob?.id === id) setStatus("ai-status", "查詢原工作未確認；可稍後再查詢。沒有重新送出辨識。", "unknown");
+  } finally { jobBusy = false; updateRealControls(); }
+}
 async function saveKey() {
+  if (recognitionConfig.mode !== "direct") return;
   const key = $("ai-key").value;
   const issue = keyInputError(key);
   if (issue) { setStatus("key-status", issue, "fail"); return; }
@@ -606,6 +677,7 @@ async function saveKey() {
   }
 }
 async function clearKey() {
+  if (recognitionConfig.mode !== "direct") return;
   keyBusy = true;
   updateRealControls();
   try {
@@ -619,7 +691,7 @@ async function clearKey() {
   finally { keyBusy = false; updateRealControls(); }
 }
 async function checkKey() {
-  if (!aiKeyConfigured) return;
+  if (recognitionConfig.mode !== "direct" || !aiKeyConfigured) return;
   keyBusy = true;
   updateRealControls();
   setStatus("check-status", "正在確認 Google 文字連線，請稍候……", "working");
@@ -639,14 +711,19 @@ async function checkKey() {
   } finally { keyBusy = false; updateRealControls(); }
 }
 function runReal() {
-  if (!currentDocument || !aiKeyConfigured || jobBusy || jobSubmitUnknown) return;
-  if (!window.confirm("這次會將已上傳的測試 PDF 傳給 Google Gemini，可能使用你的 API 額度。請確認檔案已獲准外傳且沒有客戶或個人資料；要開始嗎？")) return;
+  if (!currentDocument || jobBusy || jobSubmitUnknown || recognitionIssue(currentDocument) ||
+    jobs.some(job => job.document_id === currentDocument.id && brokerLocked(job))) return;
+  if (!window.confirm(`${completedBrokerJob(currentDocument.id) ? "建立新的辨識工作，再次" : "這次會"}將已上傳的測試 PDF 傳給 Google，${recognitionConfig.mode === "direct" ? "使用個人金鑰，" : ""}可能使用 API 額度。請確認檔案已獲准外傳且沒有客戶或個人資料；要開始嗎？`)) return;
   jobKey = null;
-  recognize(true, true);
+  return recognize(true, true);
 }
 
 async function recognize(rerun = false, real = false) {
-  if (!currentDocument || jobBusy || real && !aiKeyConfigured) return;
+  if (!currentDocument || jobBusy) return;
+  if (real && recognitionIssue(currentDocument)) { setStatus("real-status", recognitionIssue(currentDocument), "fail"); return; }
+  if (jobs.some(job => job.document_id === currentDocument.id && brokerLocked(job))) {
+    setStatus("ai-status", "這份 PDF 已有尚未完成的辨識工作，請查詢原辨識工作；不會建立新工作。", "unknown"); return;
+  }
   if (!rerun && currentJob) { await pollJob(currentJob.id); return; }
   diagnostics.newOperation();
   jobBusy = true;
@@ -659,30 +736,32 @@ async function recognize(rerun = false, real = false) {
   try {
     jobKey = jobKey || crypto.randomUUID();
     const response = await api("jobs", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({document_id: currentDocument.id, request_key: jobKey, scenario: real ? "real" : $("scenario").value})});
+      body: JSON.stringify({document_id: currentDocument.id, request_key: jobKey, scenario: real ? "real" : $("scenario").value,
+        ...(real && completedBrokerJob(currentDocument.id) ? {new_attempt: true} : {})})});
     jobKey = null;
     showJob(response.data);
     jobs.unshift(response.data);
     await pollJob(response.data.id);
   } catch (error) {
     const code = safeCode(error, "JOB_SUBMIT_FAILED");
-    jobSubmitUnknown = !!error.unknown;
+    jobSubmitUnknown = !!error.unknown || real && recognitionConfig.mode === "broker" &&
+      ["BROKER_HTTP_UNKNOWN", "BROKER_BAD_RESPONSE", "BROKER_CONFLICT", "BAD_JSON_RESPONSE", "HTTP_ERROR"].includes(error.code);
     if (error.code === "KEY_REQUIRED") {
       aiKeyConfigured = false;
       setStatus("key-status", keyAdvice("KEY_REQUIRED"), "fail");
     }
-    mark("ai", error.unknown ? "unknown" : "fail", {code, http: error.status});
-    setStatus("ai-status", error.unknown
+    mark("ai", jobSubmitUnknown ? "unknown" : "fail", {code, http: error.status});
+    setStatus("ai-status", jobSubmitUnknown
       ? "還不能確認測試是否開始。請重新整理頁面查看；不要立刻重做。若仍不清楚，請複製報告。"
       : error.code === "JOB_LIMIT" ? "這份 PDF 的測試次數已達上限，請複製報告傳回提供連結的人。"
-      : real ? "Google 辨識無法開始。請檢查金鑰狀態或複製報告。"
-      : "模擬測試無法開始。請複製報告傳回提供連結的人。", error.unknown ? "unknown" : "fail");
+      : real ? recognitionConfig.mode === "broker" ? "AI 辨識無法開始。請核對辨識狀態及限制，或複製報告。" : "Google 辨識無法開始。請檢查金鑰狀態或複製報告。"
+      : "模擬測試無法開始。請複製報告傳回提供連結的人。", jobSubmitUnknown ? "unknown" : "fail");
     nextStep(`${real ? "Google PDF 辨識" : "模擬測試"}未完成。請到步驟 4 複製報告。`);
     reportReady();
   } finally {
     jobBusy = false;
     $("recognize-button").disabled = !currentDocument || !!currentJob;
-    $("rerun-button").disabled = !currentJob || jobSubmitUnknown || ["queued", "running", "unknown"].includes(currentJob.state);
+    $("rerun-button").disabled = !currentJob || jobSubmitUnknown || brokerLocked(currentJob) || ["queued", "running", "unknown"].includes(currentJob.state);
     updateRealControls();
   }
 }
@@ -722,6 +801,7 @@ async function loadBootstrap() {
     documents = response.data.documents;
     jobs = response.data.jobs;
     aiKeyConfigured = !!response.data.ai_key_configured;
+    recognitionConfig = response.data.recognition || {mode: "direct", ready: true, max_pdf_bytes: maxBytes};
     setStatus("key-status", aiKeyConfigured
       ? "金鑰仍暫存在此服務的記憶體；到期或重新啟動後需重新輸入。"
       : "尚未設定金鑰；仍可使用上方模擬測試。", aiKeyConfigured ? "pass" : "");
@@ -761,12 +841,16 @@ async function initialize() {
   $("shared-refresh").addEventListener("click", refreshShared);
   $("pdf-file").addEventListener("change", onFileChanged);
   $("recognize-button").addEventListener("click", () => recognize(false));
-  $("rerun-button").addEventListener("click", () => { jobKey = null; recognize(true); });
+  $("rerun-button").addEventListener("click", () => {
+    if (currentJob?.execution_mode === "broker") return runReal();
+    jobKey = null; return recognize(true);
+  });
   $("copy-button").addEventListener("click", copyReport);
   $("save-key").addEventListener("click", saveKey);
   $("clear-key").addEventListener("click", clearKey);
   $("check-key").addEventListener("click", checkKey);
   $("real-button").addEventListener("click", runReal);
+  $("refresh-job").addEventListener("click", queryOriginalJob);
   updateUploadChoice();
   updateRealControls();
   $("startup-retry").addEventListener("click", loadBootstrap);
