@@ -16,6 +16,7 @@ const state = {documents: [], links: [], products: [], selected: null, fields: b
   source: "manual", kind: "purchase_order", baseline: "", parseBaseline: "", filters: {}, viewed: [],
   selectedProduct: null, productAliases: [], productBaseline: "", duplicateApproval: null};
 let sharedDocuments = [];
+let loginPending = false;
 const activity = createActivityLock($("workspace"));
 const labels = {company: "公司", number: "單號", date: "文件日期", currency: "幣別",
   code: "品號", description: "描述", quantity: "數量", unit: "單位",
@@ -624,9 +625,13 @@ async function refresh() {
   renderLinks(); renderProducts(); updateDuplicateHint(); await search(); await refreshShared();
 }
 async function login(event) {
-  event.preventDefault(); const password = $("password").value; $("password").value = "";
+  event.preventDefault();
+  if (loginPending) return;
+  loginPending = true;
+  const password = $("password").value; $("password").value = "";
   try {await api("login", "POST", {password}); await refresh(); status("已登入；未存欄位仍保留在此頁。 ");}
   catch (error) {status(`登入失敗：${codeMessage(error.code)}`, true);}
+  finally {loginPending = false;}
 }
 $("login-form").addEventListener("submit", login);
 $("source").addEventListener("change", chooseSource);
