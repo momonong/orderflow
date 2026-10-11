@@ -52,4 +52,4 @@ HP `/etc/caddy/Caddyfile` SHA-256 為 `0e9b6473c465309ea5fad4dde547b9f286d3a363a
 - 後檢只有匿名 HTTP、原始碼／靜態檔、systemd、listener 與權限核對；沒有正式登入、上傳、Google 呼叫、資料修改、服務重啟或再次部署。
 - 手機 Safari 的實際「保存 → 登出 → 重登入」仍待人工驗收。原四筆 Invoice 的存在、原 owner 與恢復方式尚未查核，不能宣稱已找回。
 - cookie 仍為會話型；清除 cookie、換瀏覽器／裝置及登入回應本身遺失，不在本修復的保證內。詳見[修復紀錄](logout-record-retention-2026-10-11.md)。
-- 備份、ASUS 私有 staging、分支與 worktree 均保留。舊部署文件提交 `a0fb0a81d7dcef770a2587ab2cdd525638955156` 所在分支未改動。本次新增部署文件僅保存在本機文件分支，尚未推送或合併；未建立 tag/release。
+- 備份、ASUS 私有 staging、分支與 worktree 均保留。舊部署文件提交 `a0fb0a81d7dcef770a2587ab2cdd525638955156` 所在分支未改動。部署後檢完成時，新增紀錄先存於本機文件分支；後續 Git 交付以對應 PR 為準。未建立 tag/release。
