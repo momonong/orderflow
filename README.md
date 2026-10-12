@@ -1,6 +1,14 @@
 # OrderFlow 物流管理草稿與診斷測試
 
-## 家人試用版 0.3.1
+## 0.4.0：API Quota Broker 接入
+
+本版加入持久化 Broker PDF 辨識工作，保留原 request key 與結果不明狀態；已確認未受理的 busy 工作可明確繼續原工作，避免重複提交。管理／診斷頁提供對應狀態，辨識結果仍須人工確認後保存。PDF 上限 8 MiB，正式配置的輸出上限為 8192 tokens；未配置有效 input bound 或 credential 時拒絕新送出，沒有自動付費或直接供應商 fallback。
+
+2026-10-12 的既有部署證據指向 ASUS `316ec314b7878994c3c50eed562f3be9f990dfbd`（當時版本欄位仍為 0.3.1）。唯一 941-byte 合成 PDF 經正式 worker → Broker → Google 免費目標完成：CountTokens／生成各一次，預期欄位吻合、未截斷、實際 input 661／output 134 tokens 已結算，舊資料保留。本次 0.4.0 更新是 Git 版本交付，未重新部署或呼叫供應商；HTTP 上傳、表單登入、瀏覽器、公司網路與人工驗收仍待完成。
+
+接入配置及限制見 [Broker 接入說明](docs/broker-integration.md)，固定來源與收據見 [部署驗收證據](docs/evidence/broker-integration-2026-10-12/README.md)。既有一次性部署腳本依其釘選來源使用，不能視為 0.4.0 的通用升級指令。
+
+## 既有家人試用功能（0.3.1）
 
 這版在原管理頁與診斷頁提供**逐份明確加入**的共用試用 PDF 清單；只有本人原先上傳的 PDF 可以加入。家人在三個頁面選用後會取得自己的副本，既有 AI 工作、金鑰與人工修改不會一起轉移，也不會自動呼叫 Google。取消共用會阻止新取用，已取得的私人副本保留；副本不能再次分享。整合試用頁自行保存的 PDF 暫不能當共用來源，該頁選用共用 PDF 的上限為 6 MiB。
 
@@ -63,3 +71,5 @@ node --check web/manage.js
 ```
 
 測試涵蓋同站 API、PDF 邊界及持久化、公開來源限制、金鑰隔離/清除/重啟、固定模型請求格式、Google 錯誤碼、模擬與可控 stub 工作。沒有真實金鑰時，**不能宣稱 Google API 或 PDF 辨識實測通過**；公司瀏覽器及資料外傳許可也需由使用者確認。
+
+Broker 接入的配置與保資料部署流程見 [Broker 接入說明](docs/broker-integration.md)。範例配置維持安全預設，未提供有效 input bound 與 credential 時拒絕新送出；已完成的有界合成驗收與仍待完成的使用流程驗收以本文件 0.4.0 節及固定收據為準。

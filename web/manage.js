@@ -3,6 +3,7 @@ const apiBase = "/orderflow/api/";
 const el = id => document.getElementById(id);
 const state = {documents: [], jobs: [], drafts: [], recordSets: [], localSources: [], shared: [],
   localSource: null, localPreview: null, parseTask: null, key: false, selected: null,
+  recognition: {mode: "direct", ready: true, max_pdf_bytes: 8 * 1024 * 1024},
   job: null, rows: [], recordIssues: [], revision: 0, editSerial: 0,
   dirty: false, busy: false, uploadKey: null,
   uploadFile: null, pendingFile: null, pendingKind: null, pendingRecordEdit: null,
@@ -43,6 +44,55 @@ const diagnostics = window.OrderflowDiagnostics?.create(apiBase) || {
   newOperation() { return uuid(); }, get traceId() { return ""; }
 };
 function status(id, message, kind = "") { el(id).textContent = message; el(id).dataset.state = kind; }
+function recognitionIssue(doc) {
+  const config = state.recognition;
+  if (!["broker", "direct"].includes(config.mode) || !config.ready)
+    return "AI 辨識尚未設定完成，請聯絡提供網站的人。仍可上傳 PDF 或使用本機解析與人工記錄。";
+  if (!Number.isSafeInteger(config.max_pdf_bytes) || config.max_pdf_bytes < 1)
+    return "辨識的 PDF 上限尚未確認，請聯絡提供網站的人。";
+  if (doc && (!Number.isSafeInteger(doc.size) || doc.size > config.max_pdf_bytes))
+    return `這份 PDF 超過辨識上限 ${pdfCap(config.max_pdf_bytes)}，可保留上傳檔案並使用人工記錄。`;
+  if (config.mode === "direct" && !state.key) return "請先設定 Google AI Studio 金鑰才能辨識。";
+  return null;
+}
+function pdfCap(size) { return `${Number((size / (1024 * 1024)).toFixed(3))} MiB`; }
+function brokerLocked(job) {
+  return job?.execution_mode === "broker" && !(job.state === "done" && job.broker?.phase === "complete" &&
+    job.broker?.response_truncated !== true && !job.error_code);
+}
+function completedBrokerJob(documentId) {
+  return state.jobs.some(job => job.document_id === documentId && job.execution_mode === "broker" && !brokerLocked(job));
+}
+function brokerJobMessage(job) {
+  if (job.execution_mode !== "broker") return null;
+  if (job.broker?.phase === "busy_paused")
+    return "辨識服務持續忙碌，這份工作尚未被接收。可按「繼續原辨識工作」稍後再送出同一份工作。";
+  if (job.error_code === "BROKER_WORK_BUSY")
+    return "辨識服務忙碌，這份工作尚未被接收；系統正在等候，請勿重複建立工作。";
+  if (job.broker?.response_truncated === true || job.error_code === "BROKER_RESULT_INCOMPLETE")
+    return "辨識回應不完整，無法採用為品項。請查詢原工作或聯絡提供網站的人；不會自動重送。";
+  if (job.broker?.phase === "expired" || job.error_code === "BROKER_RESULT_EXPIRED")
+    return "辨識結果已到期，目前無法取得內容。請聯絡提供網站的人；不會自動重送或改用個人金鑰。";
+  if (job.state === "unknown" || job.broker?.phase === "unknown")
+    return "辨識結果未知，請求可能已送達並使用額度。請查詢原辨識工作；不會自動建立新工作或改用個人金鑰。";
+  if (["prepared", "submitting"].includes(job.broker?.phase)) return "正在送交 AI 辨識，請稍候。";
+  if (job.broker?.phase === "pending" || ["queued", "running"].includes(job.state))
+    return "辨識工作已排隊，正在查詢原工作的結果，請勿重複送出。";
+  if (job.state === "done") return "辨識完成。請逐項核對，必要時編修並儲存草稿。";
+  return "辨識未完成。請查看錯誤資訊並聯絡提供網站的人；不會自動重試。";
+}
+function renderRecognitionConfig() {
+  const broker = state.recognition.mode === "broker";
+  el("direct-key-settings").hidden = broker;
+  if (broker) clearKeyInput();
+  el("recognition-model").textContent = state.recognition.model || "Google AI";
+  el("recognize").textContent = completedBrokerJob(state.selected) ? "再次辨識（需確認）" : "送交 Google AI 辨識";
+  const issue = recognitionIssue(state.documents.find(doc => doc.id === state.selected));
+  const cap = Number.isSafeInteger(state.recognition.max_pdf_bytes)
+    ? `單檔辨識上限 ${pdfCap(state.recognition.max_pdf_bytes)}；上傳上限仍為 8 MiB。` : "";
+  status("recognition-status", `${broker ? "網站提供的 AI 辨識，不必填入個人 API 金鑰。" : "使用個人 AI Studio 金鑰。"}${cap}${issue || ""}`,
+    issue ? "unknown" : "good");
+}
 function safeError(error) {
   const parts = [error.code || "NETWORK_ERROR"];
   if (error.status) parts.push(`HTTP ${error.status}`);
@@ -115,7 +165,8 @@ async function copyDiagnosticReport() {
   const field = el("diagnostic-report");
   const failedJob = state.job?.state === "failed" || state.job?.state === "unknown"
     ? `\n\n${jobErrorSummary(state.job)}` : "";
-  field.value = diagnostics.summary() + failedJob;
+  const brokerSummary = brokerDiagnosticSummary(state.job);
+  field.value = diagnostics.summary() + failedJob + (brokerSummary ? `\n\n${brokerSummary}` : "");
   try {
     if (!navigator.clipboard?.writeText) throw Error("unavailable");
     await navigator.clipboard.writeText(field.value);
@@ -138,6 +189,7 @@ function showLogin(message = "請輸入網站密碼。", preserveEditor = false)
     state.selected = null; state.job = null; state.rows = []; state.pendingRecordEdit = null;
   }
   state.pendingFile = null; state.pendingKind = null; state.key = false;
+  state.recognition = {mode: "direct", ready: false, max_pdf_bytes: null};
   state.pendingJobKeys.clear(); el("csv-export").hidden = true;
   el("retry-upload").hidden = true;
   clearJobErrorTools();
@@ -154,6 +206,7 @@ function showWorkspace(data) {
       state.localSources.some(source => source.id === pending.localSourceId && source.document_id === pending.documentId));
   if (canRestore) { state.selected = pending.documentId; state.job = null; }
   state.key = !!data.ai_key_configured;
+  state.recognition = data.recognition || {mode: "direct", ready: true, max_pdf_bytes: 8 * 1024 * 1024};
   if (!keyWorkspaceShown) {
     clearKeyInput();
     keyWorkspaceShown = true;
@@ -209,15 +262,22 @@ async function load() {
   }
 }
 function refreshControls() {
-  const editable = (state.job?.state === "done") || !!state.localSource || !!state.localPreview;
-  el("recognize").disabled = !state.selected || !state.key || state.busy ||
+  const editable = (state.job?.state === "done" && !brokerLocked(state.job)) || !!state.localSource || !!state.localPreview;
+  renderRecognitionConfig();
+  el("recognize").disabled = !state.selected || !!recognitionIssue(state.documents.find(doc => doc.id === state.selected)) || state.busy ||
+    state.jobs.some(job => job.document_id === state.selected && brokerLocked(job)) ||
     !!state.recordSets.find(set => set.document_id === state.selected && set.source_local_id);
+  el("refresh-job").hidden = !state.job || state.job.state === "done" && !brokerLocked(state.job);
+  el("refresh-job").disabled = state.busy || !!state.polling;
+  el("refresh-job").textContent = state.job?.broker?.phase === "busy_paused" && !busyResumeUnknown.has(state.job.id)
+    ? "繼續原辨識工作" : "查詢原辨識工作";
   el("upload").disabled = !(state.pendingFile || el("pdf").files?.length) || state.busy;
   el("local-parse").disabled = !el("local-pdf").files?.length || state.busy;
   el("local-cancel").disabled = !state.parseTask;
   el("add-row").disabled = !editable || state.busy;
   el("save-draft").disabled = !editable || !state.rows.length || !state.dirty || state.busy;
-  el("clear-key").disabled = !state.key || state.busy;
+  el("set-key").disabled = state.recognition.mode !== "direct" || state.busy;
+  el("clear-key").disabled = state.recognition.mode !== "direct" || !state.key || state.busy;
 }
 function renderDocuments() {
   const target = el("documents"); target.replaceChildren();
@@ -311,7 +371,8 @@ function renderJobs() {
   relevant.forEach((job, index) => {
     const button = document.createElement("button"); button.type = "button"; button.className = "list-button";
     button.setAttribute("aria-pressed", String(job.id === state.job?.id));
-    button.textContent = `辨識 ${relevant.length - index} · ${job.state}${job.error_code ? ` · ${job.error_code}` : ""} · ${new Date(job.created_ms).toLocaleString()}`;
+    const label = {queued: "排隊中", running: "辨識中", unknown: "結果未知", done: "完成", failed: "未完成"}[job.state] || "待確認";
+    button.textContent = `辨識 ${relevant.length - index} · ${label} · ${new Date(job.created_ms).toLocaleString()}`;
     button.addEventListener("click", () => { if (!state.busy) selectJob(job.id); });
     target.append(button);
   });
@@ -351,6 +412,16 @@ function utcTime(value) {
   const time = new Date(value);
   return Number.isFinite(time.getTime()) ? time.toISOString() : "unknown";
 }
+function brokerDiagnosticSummary(job) {
+  if (job?.execution_mode !== "broker") return "";
+  const id = typeof job.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.id)
+    ? job.id : "unknown";
+  const phase = ["prepared", "submitting", "pending", "unknown", "complete", "failed", "expired"].includes(job.broker?.phase)
+    ? job.broker.phase : "unknown";
+  const usage = job.broker?.usage_unknown === true ? "true" : job.broker?.usage_unknown === false ? "false" : "unknown";
+  return ["OrderFlow 辨識服務診斷資訊", `job_id: ${id}`, "execution_mode: broker",
+    `broker_phase: ${phase}`, `usage_unknown: ${usage}`].join("\n");
+}
 function jobErrorSummary(job) {
   const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const id = typeof job.id === "string" && validUuid.test(job.id) ? job.id : "unknown";
@@ -358,7 +429,11 @@ function jobErrorSummary(job) {
     "AI_RATE_LIMITED", "AI_HTTP_ERROR", "AI_BAD_RESPONSE", "AI_AUTH_FAILED",
     "AI_MODEL_UNAVAILABLE", "AI_BAD_REQUEST", "AI_HTTP_UNKNOWN", "AI_RESULT_UNKNOWN",
     "AI_FAILURE",
-    "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN"]);
+    "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "BROKER_INPUT_BOUND_REQUIRED", "BROKER_PDF_TOO_LARGE",
+    "BROKER_REQUEST_TOO_LARGE", "BROKER_CONFIG_INVALID", "BROKER_CONFIG_CHANGED", "BROKER_HTTP_UNKNOWN",
+    "BROKER_BAD_RESPONSE", "BROKER_CONFLICT", "BROKER_UNAUTHORIZED", "BROKER_REJECTED",
+    "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE", "BROKER_WORK_BUSY",
+    "BROKER_BUSY_RESUME_NOT_ALLOWED", "BROKER_MODE_INACTIVE"]);
   const code = safeCodes.has(job.error_code) ? job.error_code : "UNKNOWN";
   const created = utcTime(job.created_ms);
   const started = utcTime(job.started_ms);
@@ -415,15 +490,15 @@ function selectJob(id) {
   try {
     state.job = job; state.localSource = null; state.localPreview = null;
     renderJobs(); renderJobErrorTools(job);
-    if (job.state === "queued" || job.state === "running") { status("job-status", "辨識執行中…");
+    if (job.state === "queued" || job.state === "running") { status("job-status", brokerJobMessage(job) || "辨識執行中…");
       clearDraftEditor(); pollJob(id); return; }
-    if (job.state !== "done") { status("job-status",
-      job.state === "unknown"
+    if (job.state !== "done" || brokerLocked(job)) { status("job-status",
+      brokerJobMessage(job) || (job.state === "unknown"
         ? "辨識結果不明。請求可能已送達 Google 並計費；請勿連續按辨識。稍後重新載入，若仍不清楚請複製下方資訊。"
-        : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。",
+        : "辨識未完成。請查看下方錯誤資訊並聯絡提供網站的人；系統不會自動重試。"),
       job.state === "unknown" ? "unknown" : "error");
       clearDraftEditor(); return; }
-    status("job-status", "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
+    status("job-status", brokerJobMessage(job) || "辨識完成。請逐項核對，必要時編修並儲存草稿。", "good");
     const selectedDoc = state.documents.find(doc => doc.id === state.selected);
     if (selectedDoc?.document_kind === "purchase_order" || selectedDoc?.document_kind === "invoice") {
       selectTypedJob(job, selectedDoc.document_kind);
@@ -457,16 +532,40 @@ function clearDraftEditor() {
 async function pollJob(id) {
   if (state.polling === id) return;
   state.polling = id;
+  refreshControls();
   try {
     for (let attempt = 0; attempt < 20 && state.job?.id === id; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 1500));
       const job = await api(`management/jobs/${id}`);
       state.jobs = state.jobs.map(item => item.id === id ? job : item);
       if (job.state !== "queued" && job.state !== "running") { selectJob(id); return; }
+      state.job = job; status("job-status", brokerJobMessage(job) || "辨識執行中…");
     }
     if (state.job?.id === id) status("job-status", "仍在等待；可稍後重新載入工作狀態。請勿直接重複送出。", "unknown");
-  } catch (error) { if (state.job?.id === id) status("job-status", `查詢中斷：${safeError(error)}。可重新載入查詢，不會自動重送。`, "unknown"); }
-  finally { state.polling = null; }
+  } catch (error) { if (state.job?.id === id) status("job-status", "查詢中斷。可重新載入查詢，不會自動重送。", "unknown"); }
+  finally { state.polling = null; refreshControls(); }
+}
+const busyResumeUnknown = new Set();
+async function queryOriginalJob() {
+  const id = state.job?.id;
+  if (!id || state.busy || state.polling) return;
+  const resume = state.job.broker?.phase === "busy_paused" && !busyResumeUnknown.has(id);
+  if (resume && !window.confirm("服務先前忙碌而未接收這份工作。繼續等候並送出原工作至 Google 辨識，可能使用 API 額度；不會建立另一份工作。要繼續嗎？")) return;
+  state.busy = true; refreshControls();
+  try {
+    const job = resume
+      ? await api(`management/jobs/${id}/resume`, {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
+      : await api(`management/jobs/${id}`);
+    busyResumeUnknown.delete(id);
+    state.jobs = state.jobs.map(item => item.id === id ? job : item);
+    if (state.job?.id === id) selectJob(id);
+  } catch (error) {
+    if (resume) busyResumeUnknown.add(id);
+    if (state.job?.id === id) status("job-status", resume
+      ? "繼續工作的回應未確認；請查詢原辨識工作，不會自動再送。"
+      : "查詢原工作未確認。沒有重新送出辨識。", "unknown");
+  }
+  finally { state.busy = false; refreshControls(); }
 }
 async function login(event) {
   event.preventDefault();
@@ -656,6 +755,7 @@ async function upload() {
     renderDocuments(); clearDraft();
     status("upload-status", doc.duplicate ? "這份 PDF 已在工作區，已選取原文件；不會重複辨識。"
       : doc.same_pdf_other_kind ? "上傳完成，但相同 PDF 曾以另一類型上傳；請核對分類後再啟動辨識。"
+      : state.recognition.mode === "broker" ? "上傳完成；可查看辨識狀態及上限後啟動辨識。"
       : "上傳完成；請設定金鑰後啟動辨識。", doc.same_pdf_other_kind ? "unknown" : "good");
     showPage("upload");
   } catch (error) {
@@ -665,6 +765,7 @@ async function upload() {
   finally { state.busy = false; el("processing").hidden = true; refreshControls(); }
 }
 async function setKey() {
+  if (state.recognition.mode !== "direct") return;
   const key = el("ai-key").value;
   const issue = keyInputError(key);
   if (issue) { status("key-status", issue, "error"); return; }
@@ -677,6 +778,7 @@ async function setKey() {
   finally { clearKeyInput(); refreshControls(); }
 }
 async function clearKey() {
+  if (state.recognition.mode !== "direct") return;
   try { await api("key", {method: "DELETE"}); state.key = false;
     el("key-chip").textContent = "未設定"; el("key-chip").className = "badge";
     status("key-status", "金鑰已清除。"); }
@@ -684,8 +786,14 @@ async function clearKey() {
   refreshControls();
 }
 async function recognize() {
-  if (!state.selected || !state.key || state.busy) return;
-  if (!window.confirm("將這份 PDF 傳給 Google 辨識，可能使用你的 API 額度。確定送出？")) return;
+  if (!state.selected || state.busy) return;
+  const issue = recognitionIssue(state.documents.find(doc => doc.id === state.selected));
+  if (issue) { status("job-status", issue, "error"); return; }
+  if (state.jobs.some(job => job.document_id === state.selected && brokerLocked(job))) {
+    status("job-status", "這份 PDF 已有尚未完成的辨識工作，請查詢原辨識工作；不會建立新工作。", "unknown"); return;
+  }
+  const newAttempt = completedBrokerJob(state.selected);
+  if (!window.confirm(`${newAttempt ? "建立新的辨識工作，再次" : ""}將這份 PDF 傳給 Google 辨識，${state.recognition.mode === "direct" ? "使用個人金鑰，" : ""}可能使用 API 額度。請確認文件可外傳。確定送出？`)) return;
   diagnostics.newOperation();
   state.busy = true; refreshControls(); status("job-status", "正在建立辨識工作…");
   const documentId = state.selected;
@@ -693,10 +801,11 @@ async function recognize() {
   state.pendingJobKeys.set(documentId, requestKey);
   try {
     const job = await api("management/jobs", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({document_id: documentId, request_key: requestKey, scenario: "real"})});
+      body: JSON.stringify({document_id: documentId, request_key: requestKey, scenario: "real",
+        ...(newAttempt ? {new_attempt: true} : {})})});
     state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)]; state.job = job;
     state.pendingJobKeys.delete(documentId); selectJob(job.id);
-  } catch (error) { status("job-status", `送出狀態未確認：${safeError(error)}。先重新載入工作列表；不會自動重送付費請求。`, "unknown"); }
+  } catch (error) { status("job-status", "送出狀態未確認。先重新載入工作列表；不會自動重送付費請求。", "unknown"); }
   finally { state.busy = false; refreshControls(); }
 }
 function collectRows() {
@@ -1273,6 +1382,7 @@ el("retry-upload").addEventListener("click", upload);
 el("set-key").addEventListener("click", setKey);
 el("clear-key").addEventListener("click", clearKey);
 el("recognize").addEventListener("click", recognize);
+el("refresh-job").addEventListener("click", queryOriginalJob);
 el("copy-job-error").addEventListener("click", copyJobError);
 el("copy-diagnostic").addEventListener("click", copyDiagnosticReport);
 el("add-row").addEventListener("click", () => {

@@ -1,7 +1,7 @@
 "use strict";
 // Page-local evidence only. Nothing here is an authorization or delivery receipt.
 window.OrderflowDiagnostics = (() => {
-  const buildId = "diag-20261005-01";
+  const buildId = "diag-20261012-01";
   const routes = new Set(["bootstrap", "management_bootstrap", "documents",
     "management_documents", "jobs", "management_jobs", "job_get",
     "management_job_get", "local_sources", "record_sets", "drafts",

@@ -1,0 +1,16 @@
+{
+  "source": "316ec314b7878994c3c50eed562f3be9f990dfbd",
+  "packet": "/tmp/orderflow-broker-316ec314b7878994c3c50eed562f3be9f990dfbd",
+  "remote": "/var/tmp/orderflow-broker-316ec314b7878994c3c50eed562f3be9f990dfbd",
+  "manifest_sha256": "c6a90219b1b96504595554a3967892792102979c0f2010a9136e2da187992574",
+  "transport_sha256": "3d058f565855ded419b9e0c90a69a5ae77fcada2279b695c5c12053a03245498",
+  "files": {
+    "broker.json": "42bc636dbb0fbaa12e77be7d471fe348efa2b37761558b17b64bd6c14e171e3a",
+    "broker_readiness.py": "82da6f17076f01d17ba6557bba6710ec4680d9438d390ac2e53a7b5ba12df8db",
+    "ready.json": "fbf4c879f419412198d5716823281db08d7d46777f4da6e31040efa8843d5e1a",
+    "run-broker-integration.py": "aae6788d6c7d106ce8877ded062bf61189d7b0fa758496cc880ef3be45e2eee5",
+    "source.tar": "7b57d55f70e1801fdec3c9187367c8cc1618305274917345dc872b247c976047",
+    "upgrade-asus-broker.py": "77cfa4e8b187a99940978ec6f099d970c4c5168d344d5d8e1a340fc52d23c961",
+    "upgrade-asus-shared-trial.py": "9d812e885d559050bb290673dbddf0dc9b4a3da6897ac4606f04d58c992581fc"
+  }
+}
