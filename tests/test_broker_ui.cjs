@@ -254,5 +254,37 @@ const snapshot = {documents: [doc], jobs: [], drafts: [], ai_key_configured: fal
   assert.equal(t.uuidCount(), uncertainKeyCount);
   assert.equal(t.el('real-button').disabled, true);
   assert.match(t.el('ai-status').textContent, /還不能確認/);
-  console.log('Broker UI: no personal key, configured PDF cap, readiness, usage unknown, original-job recovery and confirmed completed rerun: ok');
+  for (const management of [true, false]) {
+    const screen = page(management);
+    const paused = {...complete, state: 'failed', error_code: 'BROKER_WORK_BUSY', broker: {phase: 'busy_paused'}};
+    screen.context.snapshot = {...snapshot, jobs: [paused]};
+    screen.context.fixtureJob = paused;
+    screen.context.fixtureDoc = doc;
+    screen.context.config = config;
+    if (management) screen.run('showWorkspace(snapshot); selectJob(fixtureJob.id)');
+    else screen.run('currentDocument=fixtureDoc; recognitionConfig=config; jobs=[fixtureJob]; showJob(fixtureJob); updateRealControls()');
+    assert.equal(screen.el('refresh-job').textContent, '繼續原辨識工作');
+    assert.match(screen.el(management ? 'job-status' : 'ai-status').textContent, /尚未被接收/);
+    const beforeResumeKeys = screen.uuidCount();
+    const requests = [];
+    screen.context.api = async (path, options) => {requests.push({path, options}); return management ? paused : {data: paused};};
+    screen.context.window.confirm = () => false;
+    await screen.run('queryOriginalJob()');
+    assert.equal(requests.length, 0);
+    screen.context.window.confirm = () => true;
+    await screen.run('queryOriginalJob()');
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, `${management ? 'management/' : ''}jobs/${paused.id}/resume`);
+    assert.equal(requests[0].options.method, 'POST');
+    assert.equal(requests[0].options.body, '{}');
+    assert.equal(screen.uuidCount(), beforeResumeKeys, 'busy resume never creates a new request key');
+    screen.context.api = async () => {throw Error('lost resume reply');};
+    await screen.run('queryOriginalJob()');
+    assert.equal(screen.el('refresh-job').textContent, '查詢原辨識工作');
+    screen.context.api = async (path, options) => {requests.push({path, options}); return management ? paused : {data: paused};};
+    await screen.run('queryOriginalJob()');
+    assert.equal(requests.at(-1).path, `${management ? 'management/' : ''}jobs/${paused.id}`);
+    assert.notEqual(requests.at(-1).options?.method, 'POST', 'lost resume receipt recovers by GET');
+  }
+  console.log('Broker UI: readiness, original-job recovery, busy resume and completed rerun: ok');
 })().catch(error => {console.error(error); process.exitCode = 1;});

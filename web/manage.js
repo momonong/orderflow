@@ -65,6 +65,10 @@ function completedBrokerJob(documentId) {
 }
 function brokerJobMessage(job) {
   if (job.execution_mode !== "broker") return null;
+  if (job.broker?.phase === "busy_paused")
+    return "辨識服務持續忙碌，這份工作尚未被接收。可按「繼續原辨識工作」稍後再送出同一份工作。";
+  if (job.error_code === "BROKER_WORK_BUSY")
+    return "辨識服務忙碌，這份工作尚未被接收；系統正在等候，請勿重複建立工作。";
   if (job.broker?.response_truncated === true || job.error_code === "BROKER_RESULT_INCOMPLETE")
     return "辨識回應不完整，無法採用為品項。請查詢原工作或聯絡提供網站的人；不會自動重送。";
   if (job.broker?.phase === "expired" || job.error_code === "BROKER_RESULT_EXPIRED")
@@ -265,6 +269,8 @@ function refreshControls() {
     !!state.recordSets.find(set => set.document_id === state.selected && set.source_local_id);
   el("refresh-job").hidden = !state.job || state.job.state === "done" && !brokerLocked(state.job);
   el("refresh-job").disabled = state.busy || !!state.polling;
+  el("refresh-job").textContent = state.job?.broker?.phase === "busy_paused" && !busyResumeUnknown.has(state.job.id)
+    ? "繼續原辨識工作" : "查詢原辨識工作";
   el("upload").disabled = !(state.pendingFile || el("pdf").files?.length) || state.busy;
   el("local-parse").disabled = !el("local-pdf").files?.length || state.busy;
   el("local-cancel").disabled = !state.parseTask;
@@ -426,7 +432,8 @@ function jobErrorSummary(job) {
     "RESULT_FORMAT_INVALID", "INTERNAL_UNKNOWN", "BROKER_INPUT_BOUND_REQUIRED", "BROKER_PDF_TOO_LARGE",
     "BROKER_REQUEST_TOO_LARGE", "BROKER_CONFIG_INVALID", "BROKER_CONFIG_CHANGED", "BROKER_HTTP_UNKNOWN",
     "BROKER_BAD_RESPONSE", "BROKER_CONFLICT", "BROKER_UNAUTHORIZED", "BROKER_REJECTED",
-    "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE"]);
+    "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE", "BROKER_WORK_BUSY",
+    "BROKER_BUSY_RESUME_NOT_ALLOWED", "BROKER_MODE_INACTIVE"]);
   const code = safeCodes.has(job.error_code) ? job.error_code : "UNKNOWN";
   const created = utcTime(job.created_ms);
   const started = utcTime(job.started_ms);
@@ -538,15 +545,26 @@ async function pollJob(id) {
   } catch (error) { if (state.job?.id === id) status("job-status", "查詢中斷。可重新載入查詢，不會自動重送。", "unknown"); }
   finally { state.polling = null; refreshControls(); }
 }
+const busyResumeUnknown = new Set();
 async function queryOriginalJob() {
   const id = state.job?.id;
   if (!id || state.busy || state.polling) return;
+  const resume = state.job.broker?.phase === "busy_paused" && !busyResumeUnknown.has(id);
+  if (resume && !window.confirm("服務先前忙碌而未接收這份工作。繼續等候並送出原工作至 Google 辨識，可能使用 API 額度；不會建立另一份工作。要繼續嗎？")) return;
   state.busy = true; refreshControls();
   try {
-    const job = await api(`management/jobs/${id}`);
+    const job = resume
+      ? await api(`management/jobs/${id}/resume`, {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
+      : await api(`management/jobs/${id}`);
+    busyResumeUnknown.delete(id);
     state.jobs = state.jobs.map(item => item.id === id ? job : item);
     if (state.job?.id === id) selectJob(id);
-  } catch (error) { if (state.job?.id === id) status("job-status", "查詢原工作未確認。沒有重新送出辨識。", "unknown"); }
+  } catch (error) {
+    if (resume) busyResumeUnknown.add(id);
+    if (state.job?.id === id) status("job-status", resume
+      ? "繼續工作的回應未確認；請查詢原辨識工作，不會自動再送。"
+      : "查詢原工作未確認。沒有重新送出辨識。", "unknown");
+  }
   finally { state.busy = false; refreshControls(); }
 }
 async function login(event) {

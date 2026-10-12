@@ -1035,7 +1035,7 @@ class AppServer(ThreadingHTTPServer):
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("UPDATE jobs SET state='unknown',error_code='BROKER_MODE_INACTIVE' "
                            "WHERE id IN (SELECT job_id FROM broker_jobs "
-                           "WHERE phase NOT IN ('complete','failed','expired'))")
+                           "WHERE phase NOT IN ('complete','failed','expired','busy_paused'))")
         if broker_config:
             kwargs = {"client_factory": broker_client_factory} if broker_client_factory else {}
             self.broker_worker = broker_jobs.BrokerJobs(
@@ -1814,6 +1814,31 @@ class Handler(BaseHTTPRequestHandler):
             purpose = "management" if path == PREFIX + "api/management/documents" else "diagnostic"
             self.upload(session_id, purpose)
             return
+        for prefix, purpose in ((PREFIX + "api/jobs/", "diagnostic"),
+                                (PREFIX + "api/management/jobs/", "management")):
+            if path.startswith(prefix) and path.endswith("/resume"):
+                job_id = path[len(prefix):-len("/resume")]
+                job = self.server.store.job(session_id, job_id, purpose) if valid_uuid(job_id) else None
+                if not job:
+                    self.error(404, "JOB_NOT_FOUND")
+                    return
+                value = self.get_json(128)
+                if value is None:
+                    return
+                if value != {}:
+                    self.error(400, "JOB_REQUEST_INVALID")
+                    return
+                if not self.server.broker_config or not self.server.broker_worker:
+                    self.error(409, "BROKER_MODE_INACTIVE")
+                    return
+                try:
+                    self.server.broker_worker.resume_busy(job_id)
+                except BrokerError as exc:
+                    self.error(409, exc.code)
+                    return
+                self.audit_commit(True)
+                self.json_response(202, self.server.store.job(session_id, job_id, purpose))
+                return
         if path in {PREFIX + "api/jobs", PREFIX + "api/management/jobs"}:
             purpose = "management" if path == PREFIX + "api/management/jobs" else "diagnostic"
             value = self.get_json()

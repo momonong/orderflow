@@ -135,6 +135,10 @@ function completedBrokerJob(documentId) {
 }
 function brokerJobMessage(job) {
   if (job.execution_mode !== "broker") return null;
+  if (job.broker?.phase === "busy_paused")
+    return "辨識服務持續忙碌，這份工作尚未被接收。可按「繼續原辨識工作」稍後再送出同一份工作。";
+  if (job.error_code === "BROKER_WORK_BUSY")
+    return "辨識服務忙碌，這份工作尚未被接收；系統正在等候，請勿重複建立工作。";
   if (job.broker?.response_truncated === true || job.error_code === "BROKER_RESULT_INCOMPLETE")
     return "辨識回應不完整，無法採用為品項。請查詢原工作或聯絡提供連結的人；不會自動重送。";
   if (job.broker?.phase === "expired" || job.error_code === "BROKER_RESULT_EXPIRED")
@@ -168,6 +172,8 @@ function updateRealControls() {
     || (!!currentJob && ["queued", "running", "unknown"].includes(currentJob.state));
   $("refresh-job").hidden = !currentJob || currentJob.state === "done" && !brokerLocked(currentJob);
   $("refresh-job").disabled = jobBusy;
+  $("refresh-job").textContent = currentJob?.broker?.phase === "busy_paused" && !busyResumeUnknown.has(currentJob.id)
+    ? "繼續原辨識工作" : "查詢原辨識工作";
 }
 function keyAdvice(code) {
   if (code === "AI_AUTH_FAILED") return "金鑰無效或沒有權限。請在 AI Studio 核對後重新設定。";
@@ -271,7 +277,8 @@ const reportCodes = new Set(["BAD_JSON_RESPONSE", "NETWORK_ERROR", "REQUEST_TIME
   "SHARED_NOT_FOUND", "SHARED_FILE_UNAVAILABLE", "SHARED_REQUEST_INVALID",
   "BROKER_INPUT_BOUND_REQUIRED", "BROKER_PDF_TOO_LARGE", "BROKER_REQUEST_TOO_LARGE",
   "BROKER_CONFIG_INVALID", "BROKER_CONFIG_CHANGED", "BROKER_HTTP_UNKNOWN", "BROKER_BAD_RESPONSE",
-  "BROKER_CONFLICT", "BROKER_UNAUTHORIZED", "BROKER_REJECTED", "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE"]);
+  "BROKER_CONFLICT", "BROKER_UNAUTHORIZED", "BROKER_REJECTED", "BROKER_RESULT_EXPIRED", "BROKER_RESULT_INCOMPLETE",
+  "BROKER_WORK_BUSY", "BROKER_BUSY_RESUME_NOT_ALLOWED", "BROKER_MODE_INACTIVE"]);
 function reportUuid(value) {
   return typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
@@ -639,16 +646,25 @@ async function pollJob(id) {
   nextStep("結果尚不確定。稍後重新整理；必要時到步驟 4 複製報告。");
   reportReady();
 }
+const busyResumeUnknown = new Set();
 async function queryOriginalJob() {
   const id = currentJob?.id;
   if (!id || jobBusy) return;
+  const resume = currentJob.broker?.phase === "busy_paused" && !busyResumeUnknown.has(id);
+  if (resume && !window.confirm("服務先前忙碌而未接收這份工作。繼續等候並送出原工作至 Google 辨識，可能使用 API 額度；不會建立另一份工作。要繼續嗎？")) return;
   jobBusy = true; updateRealControls();
   try {
-    const response = await api("jobs/" + id, {}, 4000);
+    const response = resume
+      ? await api("jobs/" + id + "/resume", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"}, 4000)
+      : await api("jobs/" + id, {}, 4000);
+    busyResumeUnknown.delete(id);
     jobs = [response.data, ...jobs.filter(job => job.id !== id)];
     if (currentJob?.id === id) showJob(response.data);
   } catch (error) {
-    if (currentJob?.id === id) setStatus("ai-status", "查詢原工作未確認；可稍後再查詢。沒有重新送出辨識。", "unknown");
+    if (resume) busyResumeUnknown.add(id);
+    if (currentJob?.id === id) setStatus("ai-status", resume
+      ? "繼續工作的回應未確認；請查詢原辨識工作，不會自動再送。"
+      : "查詢原工作未確認；可稍後再查詢。沒有重新送出辨識。", "unknown");
   } finally { jobBusy = false; updateRealControls(); }
 }
 async function saveKey() {

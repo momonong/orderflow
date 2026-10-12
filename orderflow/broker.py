@@ -30,7 +30,8 @@ SAFE_CODES = frozenset({
     "BROKER_PDF_TOO_LARGE", "BROKER_REQUEST_TOO_LARGE", "BROKER_RESULT_TOO_LARGE",
     "BROKER_BAD_REQUEST", "BROKER_BAD_RESPONSE", "BROKER_HTTP_UNKNOWN",
     "BROKER_UNAUTHORIZED", "BROKER_CONFLICT", "BROKER_REJECTED", "BROKER_NOT_FOUND",
-    "BROKER_RESULT_EXPIRED", "BROKER_PENDING", "BROKER_RESULT_INCOMPLETE",
+    "BROKER_RESULT_EXPIRED", "BROKER_PENDING", "BROKER_RESULT_INCOMPLETE", "BROKER_WORK_BUSY",
+    "BROKER_BUSY_RESUME_NOT_ALLOWED",
 })
 
 
@@ -267,30 +268,56 @@ class BrokerClient:
             deadline_timer = threading.Timer(remaining, stop_wire)
             deadline_timer.daemon = True
             deadline_timer.start()
-            connection.request(method, path, body=body, headers={
-                "Authorization": "Bearer " + token, "Content-Type": "application/json",
-                "Accept": "application/json", "Connection": "close",
-            })
+            send_failed = False
+            try:
+                connection.request(method, path, body=body, headers={
+                    "Authorization": "Bearer " + token, "Content-Type": "application/json",
+                    "Accept": "application/json", "Connection": "close",
+                })
+            except OSError:
+                # A large body may hit BrokenPipe after the server has already
+                # returned a pre-body busy rejection. Read that same socket once;
+                # only the complete exact marker can prove zero acceptance.
+                send_failed = True
+            if time.monotonic() >= deadline:
+                raise TimeoutError
             wire_socket.settimeout(max(0.001, deadline - time.monotonic()))
             response = connection.getresponse()
             raw = bytearray()
+            # The busy contract closes the connection. Read its actual bytes
+            # through EOF instead of letting Content-Length hide an extra tail.
+            closed_error = response.status == 503 and response.getheader("Connection", "").lower() == "close"
+            reader = response.fp if closed_error else response
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError
                 wire_socket.settimeout(remaining)
-                part = response.read1(min(65536, self.config.max_result_bytes + 1 - len(raw)))
+                part = reader.read1(min(65536, self.config.max_result_bytes + 1 - len(raw)))
                 raw.extend(part)
                 if len(raw) > self.config.max_result_bytes:
                     raise BrokerError("BROKER_RESULT_TOO_LARGE")
                 if not part:
-                    if response.length not in (None, 0):
+                    if not closed_error and response.length not in (None, 0):
                         raise BrokerError("BROKER_HTTP_UNKNOWN")
                     break
-                if response.isclosed():
+                if not closed_error and response.isclosed():
                     break
+            if not closed_error and response.length not in (None, 0):
+                raise BrokerError("BROKER_HTTP_UNKNOWN")
+            if send_failed:
+                try:
+                    self._http_error(response.status, bytes(raw), response.getheader("Content-Type", ""),
+                                     response.getheader("Content-Length"), response.getheader("Transfer-Encoding"),
+                                     closed_response=closed_error)
+                except BrokerError as exc:
+                    if exc.code == "BROKER_WORK_BUSY":
+                        raise
+                raise BrokerError("BROKER_HTTP_UNKNOWN")
             if response.status != 200:
-                self._http_error(response.status, bytes(raw))
+                self._http_error(response.status, bytes(raw), response.getheader("Content-Type", ""),
+                                 response.getheader("Content-Length"), response.getheader("Transfer-Encoding"),
+                                 closed_response=closed_error)
             value = _json_load(bytes(raw))
             if not isinstance(value, dict):
                 raise BrokerError("BROKER_BAD_RESPONSE")
@@ -305,7 +332,9 @@ class BrokerClient:
             connection.close()
 
     @staticmethod
-    def _http_error(status: int, raw: bytes) -> None:
+    def _http_error(status: int, raw: bytes, content_type: str,
+                    content_length: str | None = None, transfer_encoding: str | None = None,
+                    *, closed_response: bool = False) -> None:
         codes = {401: "BROKER_UNAUTHORIZED", 403: "BROKER_UNAUTHORIZED",
                  409: "BROKER_CONFLICT", 400: "BROKER_REJECTED", 404: "BROKER_NOT_FOUND"}
         if status in codes:
@@ -315,7 +344,16 @@ class BrokerClient:
                 value = _json_load(raw)
                 error = value.get("error") if isinstance(value, dict) else None
             except BrokerError:
+                value = None
                 error = None
+            # This exact pre-body rejection alone proves zero queue acceptance.
+            # A proxy page, extra fields, duplicate keys or truncated response
+            # never grants another POST, even if it contains the same wording.
+            if (closed_response and content_type.split(";", 1)[0].strip().lower() == "application/json"
+                    and isinstance(content_length, str) and re.fullmatch(r"[0-9]{1,10}", content_length)
+                    and int(content_length) == len(raw) and transfer_encoding is None
+                    and isinstance(value, dict) and set(value) == {"error"} and error == "work_busy"):
+                raise BrokerError("BROKER_WORK_BUSY")
             if error == "queue_result_pending":
                 raise BrokerError("BROKER_PENDING")
             if error == "queue_content_expired":

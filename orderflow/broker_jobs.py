@@ -1,4 +1,4 @@
-"""Durable OrderFlow-to-Broker ownership and one-submit state machine.
+"""Durable OrderFlow-to-Broker ownership and conservative submission claims.
 
 The database commit before POST is intentionally conservative: a crash in that
 gap may leave an unsent job unknown. It must never cause another provider call.
@@ -12,12 +12,19 @@ import re
 import threading
 import time
 from datetime import datetime
+from dataclasses import replace
 
 from .broker import BrokerClient, BrokerConfig, BrokerError, validate_outcome
 
-TERMINAL = {"complete", "failed", "expired"}
+TERMINAL = {"complete", "failed", "expired", "busy_paused"}
 POLL_MS = 30_000
+# Only the pinned exact work_busy rejection proves the prior POST was unsent.
+# Count and start time persist in existing columns; no schema migration is needed.
+BUSY_RETRY_DELAYS_MS = (1_000, 2_000, 4_000) + (8_000,) * 29
+BUSY_RETRY_WINDOW_MS = 240_000
 KEY = re.compile(r"[A-Za-z0-9._~-]{1,120}\Z")
+BUSY_PHASE = re.compile(r"busy_(0|[1-9]|[12][0-9]|3[0-2])\Z")
+SUBMITTING_PHASE = re.compile(r"submitting_(0|[1-9]|[12][0-9]|3[0-2])\Z")
 
 
 def canonical(value: object) -> str:
@@ -59,6 +66,10 @@ def public_metadata(db, job_id: str) -> dict | None:
     if not row:
         return None
     result = dict(row)
+    if BUSY_PHASE.fullmatch(result["phase"]):
+        result["phase"] = "prepared"
+    elif SUBMITTING_PHASE.fullmatch(result["phase"]):
+        result["phase"] = "submitting"
     result["response_truncated"] = (bool(result["response_truncated"])
                                      if result["response_truncated"] is not None else None)
     result["usage_unknown"] = bool(result["usage_unknown"])
@@ -103,7 +114,7 @@ class BrokerJobs:
         while not self.stopping.is_set():
             with self.store.db() as db:
                 rows = db.execute("SELECT job_id FROM broker_jobs WHERE phase NOT IN "
-                                  "('complete','failed','expired') AND next_poll_ms<=? "
+                                  "('complete','failed','expired','busy_paused') AND next_poll_ms<=? "
                                   "ORDER BY next_poll_ms LIMIT 32", (int(time.time() * 1000),)).fetchall()
             for row in rows:
                 if self.stopping.is_set():
@@ -134,6 +145,48 @@ class BrokerJobs:
         with self.lock:
             self._step(job_id)
 
+    def _busy(self, job_id: str, claimed_phase: str, first_submit_ms: int, rejected_count: int) -> None:
+        now = int(time.time() * 1000)
+        if rejected_count > len(BUSY_RETRY_DELAYS_MS) or now >= first_submit_ms + BUSY_RETRY_WINDOW_MS:
+            self._failure(job_id, "BROKER_WORK_BUSY", phase="busy_paused")
+            return
+        next_poll = min(now + BUSY_RETRY_DELAYS_MS[rejected_count - 1], first_submit_ms + BUSY_RETRY_WINDOW_MS)
+        with self.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute("UPDATE broker_jobs SET phase=?,next_poll_ms=? "
+                                 "WHERE job_id=? AND phase=?",
+                                 (f"busy_{rejected_count}", next_poll, job_id, claimed_phase)).rowcount
+            if changed:
+                db.execute("UPDATE jobs SET state='running',error_code=?,finished_ms=NULL,steps=? WHERE id=?",
+                           ("BROKER_WORK_BUSY", canonical({"ai": "pending", "format": "not_run"}), job_id))
+
+    def resume_busy(self, job_id: str) -> None:
+        """Explicitly renew only a proven unaccepted job's bounded busy window."""
+        with self.lock, self.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT b.*,j.state,j.error_code FROM broker_jobs b JOIN jobs j ON j.id=b.job_id WHERE b.job_id=?", (job_id,)).fetchone()
+            if (not row or row["phase"] != "busy_paused" or row["state"] != "failed"
+                    or row["error_code"] != "BROKER_WORK_BUSY" or row["execution_key"] is not None
+                    or row["gateway_state"] is not None):
+                raise BrokerError("BROKER_BUSY_RESUME_NOT_ALLOWED")
+            now = int(time.time() * 1000)
+            if row["expires_ms"] is not None and now >= row["expires_ms"]:
+                raise BrokerError("BROKER_RESULT_EXPIRED")
+            config = BrokerConfig.from_snapshot(json.loads(row["config_json"]))
+            current = self.config.snapshot()
+            if any(config.snapshot()[key] != current[key] for key in ("endpoint", "token_file")):
+                raise BrokerError("BROKER_CONFIG_CHANGED")
+            if not config.bound_ready():
+                raise BrokerError("BROKER_INPUT_BOUND_REQUIRED")
+            if hashlib.sha256(row["task_json"].encode()).hexdigest() != row["task_sha256"]:
+                raise BrokerError("BROKER_CONFLICT")
+            # No remote acceptance occurred in this phase. Keep its task, key and
+            # original TTL, while renewing the explicitly requested wait budget.
+            db.execute("UPDATE broker_jobs SET phase='busy_0',first_submit_ms=?,next_poll_ms=? WHERE job_id=?", (now, now, job_id))
+            db.execute("UPDATE jobs SET state='queued',error_code=?,finished_ms=NULL,steps=? WHERE id=?",
+                       ("BROKER_WORK_BUSY", canonical({"ai": "pending", "format": "not_run"}), job_id))
+        self.wakeup.set()
+
     def _step(self, job_id: str) -> None:
         now = int(time.time() * 1000)
         with self.store.db() as db:
@@ -144,6 +197,12 @@ class BrokerJobs:
             return
         if row["expires_ms"] is not None and now >= row["expires_ms"]:
             self._failure(job_id, "BROKER_RESULT_EXPIRED", phase="expired")
+            return
+        busy = BUSY_PHASE.fullmatch(row["phase"])
+        if busy and (row["first_submit_ms"] is None or now >= row["first_submit_ms"] + BUSY_RETRY_WINDOW_MS):
+            self._failure(job_id, "BROKER_WORK_BUSY", phase="busy_paused")
+            return
+        if now < row["next_poll_ms"]:
             return
         try:
             snapshot = json.loads(row["config_json"])
@@ -156,19 +215,36 @@ class BrokerJobs:
             task_json = row["task_json"]
             if hashlib.sha256(task_json.encode()).hexdigest() != row["task_sha256"]:
                 raise BrokerError("BROKER_CONFLICT")
+            if busy:
+                # The last wire request is bounded by the original retry window,
+                # while the persisted provider/model/payload binding stays fixed.
+                deadline = min(row["first_submit_ms"] + BUSY_RETRY_WINDOW_MS,
+                               row["expires_ms"] or row["first_submit_ms"] + BUSY_RETRY_WINDOW_MS)
+                remaining = (deadline - now) / 1000
+                config = replace(config, timeout_seconds=min(config.timeout_seconds, remaining))
             client = self.client_factory(config)
-            if row["phase"] == "prepared":
+            if row["phase"] == "prepared" or busy:
+                rejected_count = int(busy[1]) if busy else 0
+                first_submit = row["first_submit_ms"] if busy else now
+                claimed_phase = f"submitting_{rejected_count}" if busy else "submitting"
+                expires_ms = row["expires_ms"] or first_submit + 86_400_000
                 with self.store.db() as db:
                     db.execute("BEGIN IMMEDIATE")
-                    claimed = db.execute("UPDATE broker_jobs SET phase='submitting',first_submit_ms=?,"
-                                         "expires_ms=?,next_poll_ms=? WHERE job_id=? AND phase='prepared'",
-                                         (now, now + 86_400_000, now + POLL_MS, job_id)).rowcount
+                    claimed = db.execute("UPDATE broker_jobs SET phase=?,first_submit_ms=?,"
+                                         "expires_ms=?,next_poll_ms=? WHERE job_id=? AND phase=?",
+                                         (claimed_phase, first_submit, expires_ms, now + POLL_MS, job_id, row["phase"])).rowcount
                     if not claimed:
                         return
-                    db.execute("UPDATE jobs SET state='running',started_ms=? WHERE id=?", (now, job_id))
-                # Never re-enter this call once 'submitting' is committed, including
-                # timeout, malformed response, process restart, or a missing remote key.
-                metadata = client.submit(json.loads(task_json))
+                    db.execute("UPDATE jobs SET state='running',started_ms=COALESCE(started_ms,?),error_code=NULL WHERE id=?", (now, job_id))
+                # Every sending claim commits before POST. A restart in that gap
+                # only queries; durable busy_N is the sole permission to retry.
+                try:
+                    metadata = client.submit(json.loads(task_json))
+                except BrokerError as exc:
+                    if exc.code == "BROKER_WORK_BUSY":
+                        self._busy(job_id, claimed_phase, first_submit, rejected_count + 1)
+                        return
+                    raise
             else:
                 metadata = client.status(row["request_key"])
             if not isinstance(metadata, dict) or metadata.get("request_key") != row["request_key"]:
@@ -231,6 +307,11 @@ class BrokerJobs:
                            (completion["finish_reason"], completion["response_truncated"],
                             completion["usage_unknown"], job_id))
         except BrokerError as exc:
+            if exc.code == "BROKER_WORK_BUSY":
+                # A busy GET says nothing about submission acceptance. Preserve
+                # the saved phase, state and completion metadata; only defer GET.
+                self._update(job_id, next_poll_ms=min(now + POLL_MS, row["expires_ms"] or now + POLL_MS))
+                return
             terminal = {"BROKER_RESULT_INCOMPLETE", "BROKER_CONFLICT", "BROKER_REJECTED"}
             phase = "expired" if exc.code == "BROKER_RESULT_EXPIRED" else "failed" if exc.code in terminal else "unknown"
             self._failure(job_id, exc.code, phase=phase)

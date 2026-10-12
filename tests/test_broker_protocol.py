@@ -40,6 +40,18 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
         self._respond()
 
     def _respond(self):
+        if self.server.replies and self.server.replies[0][2].get("X-Fixture-Early"):
+            status, data, headers = self.server.replies.pop(0)
+            self.server.requests.append((self.command, self.path, dict(self.headers), b""))
+            raw = data if isinstance(data, bytes) else json.dumps(data).encode()
+            # Deliberately close without reading a byte of the request body.
+            length_header = "" if headers.get("X-Fixture-No-Length") else f"Content-Length: {headers.get('Content-Length', len(raw))}\r\n"
+            wire = (f"HTTP/1.1 {status} Service Unavailable\r\nContent-Type: application/json\r\n"
+                    + length_header + "Connection: close\r\n\r\n").encode()
+            self.wfile.write(wire + raw)
+            self.wfile.flush()
+            self.close_connection = True
+            return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.server.requests.append((self.command, self.path, dict(self.headers), body))
         status, data, headers = self.server.replies.pop(0)
@@ -55,10 +67,11 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
                 pass
             return
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", headers.get("Content-Length", str(len(raw))))
+        self.send_header("Content-Type", headers.get("Content-Type", "application/json"))
+        if not headers.get("X-Fixture-No-Length"):
+            self.send_header("Content-Length", headers.get("Content-Length", str(len(raw))))
         for name, value in headers.items():
-            if name != "Content-Length":
+            if name not in {"Content-Length", "Content-Type"}:
                 self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
@@ -203,6 +216,61 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertEqual(connection.call_count, 1)
             connection.return_value.request.assert_not_called()
         self.assertEqual(len(self.server.requests), 1)
+
+    def test_only_complete_exact_json_503_is_work_busy(self):
+        for method in ("submit", "status", "result"):
+            self.server.replies.append((503, {"error": "work_busy"}, {"Connection": "close"}))
+            client = BrokerClient(self.config)
+            callback = (lambda: client.submit({"request_key": "original"})) if method == "submit" else lambda: getattr(client, method)("original")
+            before = len(self.server.requests)
+            self.assert_code("BROKER_WORK_BUSY", callback)
+            self.assertEqual(len(self.server.requests), before + 1, 'transport never retries itself')
+        ambiguous = (
+            (503, {"error": "work_busy"}, {}),
+            (503, b'{"error":"work_busy"} extra', {"Content-Length": "21"}),
+            (503, {"error": "work_busy", "message": "extra"}, {}),
+            (503, {"error": "work_busy", "accepted": False}, {}),
+            (503, b'{"error":"work_busy","error":"work_busy"}', {}),
+            (503, b'{"error":"work_busy"} trailing', {}),
+            (503, b'{"error":"work_busy"', {}),
+            (503, {"error": "work_busy"}, {"Content-Type": "text/html"}),
+            (503, b'<html>work_busy</html>', {}),
+            (503, {"error": "work_busy"}, {"Content-Length": "9999"}),
+            (500, {"error": "work_busy"}, {}),
+        )
+        for status, raw, headers in ambiguous:
+            with self.subTest(status=status, raw=raw, headers=headers):
+                self.server.replies.append((status, raw, headers))
+                self.assert_code("BROKER_HTTP_UNKNOWN", lambda: BrokerClient(self.config).submit({"request_key": "original"}))
+
+    def test_eight_mib_headers_only_early_busy_and_ambiguous_close(self):
+        config = replace(self.config, max_pdf_bytes=8 * MIB, max_request_bytes=16 * MIB)
+        task = make_task(config, b"%PDF-" + b"x" * (8 * MIB - 5), None, "original-large")
+        send_errors = []
+        real_connection = http.client.HTTPConnection
+        class ObservedConnection(real_connection):
+            def request(self, *args, **kwargs):
+                try:
+                    return super().request(*args, **kwargs)
+                except OSError as exc:
+                    send_errors.append(type(exc).__name__)
+                    raise
+        for data, headers, code in (
+            ({"error": "work_busy"}, {}, "BROKER_WORK_BUSY"),
+            ({"error": "work_busy", "accepted": False}, {}, "BROKER_HTTP_UNKNOWN"),
+            (b'{"error":"work_busy"', {}, "BROKER_HTTP_UNKNOWN"),
+            ({"error": "work_busy"}, {"Content-Length": "9999"}, "BROKER_HTTP_UNKNOWN"),
+            ({"error": "work_busy"}, {"X-Fixture-No-Length": "true"}, "BROKER_HTTP_UNKNOWN"),
+            (b'{"error":"work_busy"} ', {"Content-Length": "21"}, "BROKER_HTTP_UNKNOWN"),
+        ):
+            with self.subTest(data=data, headers=headers):
+                self.server.replies.append((503, data, {"X-Fixture-Early": "true", **headers}))
+                before = len(self.server.requests)
+                with patch("orderflow.broker.http.client.HTTPConnection", ObservedConnection):
+                    self.assert_code(code, lambda: BrokerClient(config).submit(task))
+                self.assertEqual(len(self.server.requests), before + 1)
+                self.assertEqual(self.server.requests[-1][3], b"", 'the server reads no request body')
+        self.assertTrue(send_errors, 'a real early close interrupts the large send before its response is read')
 
     def test_total_deadline_bounds_trickling_headers(self):
         self.server.replies.append((200, b"", {"X-Fixture-Trickle": "true"}))
