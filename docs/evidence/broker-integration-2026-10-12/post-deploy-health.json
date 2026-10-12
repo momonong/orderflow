@@ -1,0 +1,35 @@
+{
+  "source_sha": "316ec314b7878994c3c50eed562f3be9f990dfbd",
+  "current": "/opt/orderflow/releases/316ec314b7878994c3c50eed562f3be9f990dfbd",
+  "orderflow": {
+    "active": "active",
+    "sub": "running",
+    "pid": 476403,
+    "restarts": 0,
+    "need_daemon_reload": false,
+    "memory_current_bytes": 38494208,
+    "memory_peak_bytes": 55402496,
+    "memory_swap_current_bytes": 0,
+    "memory_max_bytes": 805306368,
+    "dropins": [
+      "/etc/systemd/system/orderflow.service.d/broker.conf"
+    ]
+  },
+  "broker": {
+    "active": "active",
+    "sub": "running",
+    "pid": 473639,
+    "restarts": 0
+  },
+  "http": {
+    "endpoint": "http://127.0.0.1:18081",
+    "host_header": "momonong.me",
+    "/orderflow/": 200,
+    "/orderflow/api/health": 401
+  },
+  "probe_corrections": [
+    "Initial port18083 probe had no listener; corrected to deployment contract18081.",
+    "IP Host header gave403 as expected by origin guard; using configured Host momonong.me returned200/401."
+  ],
+  "scope": "Readonly local service checks; not external network or authenticated HTTP acceptance."
+}

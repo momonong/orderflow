@@ -150,3 +150,7 @@ ASUS 目前只讀核對：舊 runtime `12cbed79...`、無 drop-in、active/runni
 metadata-only 診斷確認 systemd materialized credential 為 root:root `0440`，父目錄 `0550`，OrderFlow UID 999/GID 983 可開啟；未輸出憑證內容。原 `mode & 0077` 拒絕此正常交付模式。readiness 與正式 client 的修正限定 `CREDENTIALS_DIRECTORY` 對應 `/run/credentials/<unit>/client_token`、root 所有且不可 group/world write 的真目錄，以及 root:root `0440` 檔案／`0500` 或 `0550` 直接父目錄；其他 group-readable token 仍拒絕。原私有 `0400`/`0600` 支援、NOFOLLOW、大小及內容格式檢查保留。修正後須以新來源、新封包及新操作識別繼續，不清除首次失敗證據。
 
 修正後 protocol 16 項 6.752 秒、readiness 15 項 0.021 秒通過。ASUS 獨立唯讀 recheck 以 readiness source SHA `82da6f17076f01d17ba6557bba6710ec4680d9438d390ac2e53a7b5ba12df8db` 執行完整固定 receipt／host／credential GET gate，結果 passed；仍為 deployment retries 0、provider POST 0、首次 preflight/raw backup/release 均不存在。非秘密 receipt 留於首次本機封包 `credential-recheck-r4.result.json`。這項結果只證明修正後 readiness，不是新部署或 Google 合成驗收。
+
+## 2026-10-12 ASUS 整合執行結果
+
+已部署本機来源 `316ec314b7878994c3c50eed562f3be9f990dfbd`，保資料 gate 與唯一合成 PDF 的正式 worker→Broker→Google 路徑通過。job done／gateway completed、finish stop、未截斷、用量非未知、預期欄位比對通過。正常配置8192、唯一合成job2048；沒有推送、合併或啟用付費。Broker同key稽核確認CountTokens與生成各一次、Google回報input661/output134並已按實際用量結算；稽核僅兩GET、零POST。完整來源、receipt、健康核對及範圍限制見 [本輪證據](evidence/broker-integration-2026-10-12/README.md)。上文「部署前／尚未」段落為此前階段紀錄，以本節與固定receipt為本輪完成狀態。
