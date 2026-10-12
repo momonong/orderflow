@@ -35,7 +35,7 @@ from .records import KINDS, RecordRowsError, validate_rows
 from .shared import SharedLibrary
 from .trial import TrialBook, valid_uuid as trial_uuid
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 PREFIX = "/orderflow/"
 MAX_PDF_BYTES = 8 * 1024 * 1024
 MAX_JSON_BYTES = 4096

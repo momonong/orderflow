@@ -10,8 +10,8 @@ import time
 import uuid
 
 EVENTS = {"http", "real_job", "key_check", "client_observation"}
-APP_VERSION = "0.3.1"
-BUILD_ID = "diag-20261005-01"
+APP_VERSION = "0.4.0"
+BUILD_ID = "diag-20261012-01"
 PHASES = {
     "received", "response_written", "response_write_unknown", "created",
     "start", "ai_start", "ai_response", "format_pass", "done", "failed",

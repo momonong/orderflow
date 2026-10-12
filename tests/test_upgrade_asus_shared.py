@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -24,12 +25,15 @@ SPEC.loader.exec_module(upgrade)
 class SharedUpgradeGateTests(unittest.TestCase):
     def test_runtime_gate_allows_only_package_version_change(self):
         repository = Path(__file__).resolve().parents[1]
+        current_version = tomllib.loads((repository / "pyproject.toml").read_text())["project"]["version"]
         with tempfile.TemporaryDirectory() as name:
             old, release = Path(name) / "old", Path(name) / "release"
             old.mkdir()
             release.mkdir()
             for filename in ("pyproject.toml", "uv.lock"):
-                candidate = (repository / filename).read_text()
+                # This historical gate remains pinned to the 0.3.0 -> 0.3.1 rollout.
+                candidate = (repository / filename).read_text().replace(
+                    f'version = "{current_version}"', 'version = "0.3.1"')
                 (release / filename).write_text(candidate)
                 (old / filename).write_text(candidate.replace('version = "0.3.1"',
                                                              'version = "0.3.0"'))

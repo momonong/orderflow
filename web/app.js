@@ -13,7 +13,7 @@ const diagnostics = (typeof window !== "undefined" && window.OrderflowDiagnostic
   record() {}, flush() {}, summary() { return "瀏覽器事件記錄未載入。"; },
   newOperation() {}, get traceId() { return testId; }
 };
-let version = "0.3.1";
+let version = "0.4.0";
 let maxBytes = 8 * 1024 * 1024;
 let documents = [];
 let sharedDocuments = [];
