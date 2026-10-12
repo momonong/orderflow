@@ -141,4 +141,12 @@ ASUS 目前只讀核對：舊 runtime `12cbed79...`、無 drop-in、active/runni
 
 這次最低live驗收已由main收斂為Store/make_task→正式worker→Broker→Google；正常8192、唯一job2048。原HTTP上傳、表單登入、瀏覽器視覺、公司網路及人工確認仍未驗，不稱HTTP E2E。
 
-本輪完整Python回歸168項59.999秒通過，新增runner保留/停写/不重播4項通過；readiness11項與transport4項定向測試通過；整合後Broker相關79項14.185秒通過；此前migration9項0.531秒通過，敏感資料格式掃描20檔0命中。
+本輪完整Python回歸168項59.999秒通過，新增runner保留/停写/不重播4項通過；readiness13項與transport4項定向測試通過；整合後Broker相關79項14.185秒通過；此前migration9項0.531秒通過，敏感資料格式掃描20檔0命中。
+
+### 首次封包停止與憑證相容性修正
+
+本機來源 `468285a2815cdab6e97a6ba1855d038ec7276d24` 的首次受保護部署，在 readiness observer 的 credential mode 檢查停止。原 local claim、root packet 與 `started.json` 保留，不重跑該操作。獨立唯讀診斷確認 preflight/raw backup/release 均未建立、沒有合成工作或 provider POST，舊 current `12cbed79...`、PID 460208 維持運行。
+
+metadata-only 診斷確認 systemd materialized credential 為 root:root `0440`，父目錄 `0550`，OrderFlow UID 999/GID 983 可開啟；未輸出憑證內容。原 `mode & 0077` 拒絕此正常交付模式。readiness 與正式 client 的修正限定 `CREDENTIALS_DIRECTORY` 對應 `/run/credentials/<unit>/client_token`、root 所有且不可 group/world write 的真目錄，以及 root:root `0440` 檔案／`0500` 或 `0550` 直接父目錄；其他 group-readable token 仍拒絕。原私有 `0400`/`0600` 支援、NOFOLLOW、大小及內容格式檢查保留。修正後須以新來源、新封包及新操作識別繼續，不清除首次失敗證據。
+
+修正後 protocol 16 項 6.752 秒、readiness 15 項 0.021 秒通過。ASUS 獨立唯讀 recheck 以 readiness source SHA `82da6f17076f01d17ba6557bba6710ec4680d9438d390ac2e53a7b5ba12df8db` 執行完整固定 receipt／host／credential GET gate，結果 passed；仍為 deployment retries 0、provider POST 0、首次 preflight/raw backup/release 均不存在。非秘密 receipt 留於首次本機封包 `credential-recheck-r4.result.json`。這項結果只證明修正後 readiness，不是新部署或 Google 合成驗收。

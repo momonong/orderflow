@@ -160,6 +160,29 @@ class BrokerConfig:
             raise BrokerError("BROKER_CONFIG_INVALID") from None
 
 
+def _credential_mode_ok(path: Path, info: os.stat_result) -> bool:
+    mode = stat.S_IMODE(info.st_mode)
+    if mode in {0o400, 0o600}:
+        return True
+    # systemd may materialize root-owned credentials as 0440 and grant the
+    # service access through its private credential mount. Do not extend this
+    # exception to arbitrary group-readable token files.
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    if (mode != 0o440 or info.st_uid != 0 or info.st_gid != 0
+            or not directory or path.parent != Path(directory)
+            or path.parent.parent != Path("/run/credentials")
+            or path.name != "client_token"):
+        return False
+    for parent in path.parents:
+        metadata = parent.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_mode & 0o022):
+            return False
+    parent_info = path.parent.lstat()
+    return (parent_info.st_gid == 0
+            and stat.S_IMODE(parent_info.st_mode) in {0o500, 0o550})
+
+
 def _read_token(path: Path | None) -> str:
     if path is None:
         raise BrokerError("BROKER_NOT_CONFIGURED")
@@ -167,7 +190,8 @@ def _read_token(path: Path | None) -> str:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 4096:
+        if (not stat.S_ISREG(info.st_mode) or not _credential_mode_ok(path, info)
+                or info.st_size > 4096):
             raise BrokerError("BROKER_NOT_CONFIGURED")
         with os.fdopen(descriptor, "rb") as credential:
             descriptor = None

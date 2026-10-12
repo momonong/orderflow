@@ -5,19 +5,61 @@ import http.server
 import io
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pypdf import PdfWriter
 
-from orderflow.broker import BrokerClient, BrokerConfig, BrokerError, MIB, make_task, validate_outcome
+from orderflow.broker import BrokerClient, BrokerConfig, BrokerError, MIB, make_task, validate_outcome, _credential_mode_ok, _read_token
 from orderflow.gemini import GeminiAdapter, ITEM_SCHEMA, MANAGEMENT_SCHEMA, recognition_prompt
 
 FAKE_TOKEN = "fixture-client-token-never-live"
+
+
+class SystemdCredentialTests(unittest.TestCase):
+    path = Path('/run/credentials/orderflow.service/client_token')
+
+    def metadata(self, mode=0o440, uid=0, gid=0):
+        return SimpleNamespace(st_mode=stat.S_IFREG | mode, st_uid=uid, st_gid=gid, st_size=len(FAKE_TOKEN))
+
+    def parent(self, path):
+        mode = 0o550 if path == self.path.parent else 0o755
+        return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=0, st_gid=0)
+
+    def test_systemd_0440_is_readable_without_exposing_value(self):
+        with tempfile.TemporaryFile() as source:
+            source.write(FAKE_TOKEN.encode()); source.seek(0)
+            descriptor = os.dup(source.fileno())
+            with patch.dict(os.environ, {'CREDENTIALS_DIRECTORY':str(self.path.parent)}), \
+                    patch('orderflow.broker.os.open', return_value=descriptor) as opened, \
+                    patch('orderflow.broker.os.fstat', return_value=self.metadata()), \
+                    patch.object(Path, 'lstat', autospec=True, side_effect=self.parent):
+                self.assertEqual(_read_token(self.path), FAKE_TOKEN)
+                self.assertEqual(opened.call_args.args[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+    def test_group_read_exception_requires_exact_trusted_credential(self):
+        with patch.dict(os.environ, {'CREDENTIALS_DIRECTORY':str(self.path.parent)}), \
+                patch.object(Path, 'lstat', autospec=True, side_effect=self.parent):
+            for mode in (0o640, 0o444, 0o450, 0o460, 0o2440):
+                self.assertFalse(_credential_mode_ok(self.path, self.metadata(mode)))
+            self.assertFalse(_credential_mode_ok(self.path, self.metadata(uid=1000)))
+            self.assertFalse(_credential_mode_ok(self.path, self.metadata(gid=1000)))
+            self.assertFalse(_credential_mode_ok(Path('/tmp/client_token'), self.metadata()))
+            self.assertFalse(_credential_mode_ok(self.path.with_name('other'), self.metadata()))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_credential_mode_ok(self.path, self.metadata()))
+
+    def test_symlink_or_writable_parent_is_rejected(self):
+        for mode, uid in ((stat.S_IFLNK | 0o777, 0), (stat.S_IFDIR | 0o770, 0), (stat.S_IFDIR | 0o550, 1000)):
+            with patch.dict(os.environ, {'CREDENTIALS_DIRECTORY':str(self.path.parent)}), \
+                    patch.object(Path, 'lstat', return_value=SimpleNamespace(st_mode=mode, st_uid=uid, st_gid=0)):
+                self.assertFalse(_credential_mode_ok(self.path, self.metadata()))
 writer = PdfWriter()
 writer.add_blank_page(width=100, height=100)
 stream = io.BytesIO()

@@ -213,11 +213,24 @@ def date(value):
 def pick(value,allowed):
     need(isinstance(value,str) and value in allowed);return value
 def alarm(*args):raise TimeoutError()
+def credential_mode_ok(path,info):
+    mode=stat.S_IMODE(info.st_mode)
+    if mode in {0o400,0o600}:return True
+    # 0440 is only the root-owned private systemd credential mount exception.
+    directory=os.environ.get('CREDENTIALS_DIRECTORY')
+    if (mode!=0o440 or info.st_uid!=0 or info.st_gid!=0 or not directory
+        or path.parent!=Path(directory) or path.parent.parent!=Path('/run/credentials')
+        or path.name!='client_token'):return False
+    for parent in path.parents:
+        metadata=parent.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=0 or metadata.st_mode&0o022:return False
+    parent_info=path.parent.lstat()
+    return parent_info.st_gid==0 and stat.S_IMODE(parent_info.st_mode) in {0o500,0o550}
 try:
     signal.signal(signal.SIGALRM,alarm);signal.setitimer(signal.ITIMER_REAL,15)
     path=Path(os.environ['CREDENTIALS_DIRECTORY'])/'client_token'
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-    info=os.fstat(fd);need(stat.S_ISREG(info.st_mode) and info.st_mode&0o077==0 and info.st_size<=4096)
+    info=os.fstat(fd);need(stat.S_ISREG(info.st_mode) and credential_mode_ok(path,info) and info.st_size<=4096)
     with os.fdopen(fd,'rb') as file:token=file.read(4097).decode('ascii').strip()
     need(re.fullmatch(r'[A-Za-z0-9._~+/-]+=*',token) is not None and 32<=len(token)<=4096)
     def get(route):

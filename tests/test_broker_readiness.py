@@ -1,4 +1,5 @@
 import copy
+import ast
 from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
@@ -180,6 +181,69 @@ class ReadinessTests(unittest.TestCase):
             with self.assertRaises(SystemExit):exec(gate.OBSERVER_CODE,{})
         self.assertNotIn(token,output.getvalue())
         self.assertEqual(json.loads(output.getvalue()),{'error':'BROKER_READINESS_OBSERVER_FAILED'})
+
+    def observer_mode_policy(self):
+        tree=ast.parse(gate.OBSERVER_CODE)
+        definitions=[node for node in tree.body if isinstance(node,(ast.Import,ast.ImportFrom,ast.FunctionDef))]
+        namespace={}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=definitions,type_ignores=[])),'<observer-policy>','exec'),namespace)
+        return namespace['credential_mode_ok']
+
+    def test_systemd_0440_policy_rejects_untrusted_metadata_paths_and_parents(self):
+        policy=self.observer_mode_policy()
+        directory=Path('/run/credentials/run-readiness-fixture.service')
+        path=directory/'client_token'
+        def metadata(mode,uid=0,gid=0):return SimpleNamespace(st_mode=mode,st_uid=uid,st_gid=gid)
+        token=metadata(stat.S_IFREG|0o440)
+        def parent_info(parent):return metadata(stat.S_IFDIR|(0o550 if parent==directory else 0o755))
+        with patch.dict(os.environ,{'CREDENTIALS_DIRECTORY':str(directory)}),patch.object(Path,'lstat',parent_info):
+            self.assertTrue(policy(path,token))
+            self.assertTrue(policy(path,metadata(stat.S_IFREG|0o600)))
+            self.assertTrue(policy(path,metadata(stat.S_IFREG|0o400)))
+            for mode,uid,gid in ((0o440,999,0),(0o440,0,983),(0o640,0,0),(0o444,0,0),(0o450,0,0),(0o460,0,0)):
+                self.assertFalse(policy(path,metadata(stat.S_IFREG|mode,uid,gid)))
+            self.assertFalse(policy(directory/'other_name',token))
+            self.assertFalse(policy(Path(self.tmp.name)/'client_token',token))
+            with patch.dict(os.environ,{'CREDENTIALS_DIRECTORY':'/run/credentials/other.service'}):
+                self.assertFalse(policy(path,token))
+            with patch.dict(os.environ,{},clear=True):self.assertFalse(policy(path,token))
+        for bad in (metadata(stat.S_IFDIR|0o550,999,0),metadata(stat.S_IFDIR|0o550,0,983),
+                    metadata(stat.S_IFDIR|0o570),metadata(stat.S_IFDIR|0o755),metadata(stat.S_IFLNK|0o777)):
+            def wrong_parent(parent):return bad if parent==directory else parent_info(parent)
+            with patch.dict(os.environ,{'CREDENTIALS_DIRECTORY':str(directory)}),patch.object(Path,'lstat',wrong_parent):
+                self.assertFalse(policy(path,token))
+        def writable_ancestor(parent):return metadata(stat.S_IFDIR|0o777) if parent==Path('/run') else parent_info(parent)
+        with patch.dict(os.environ,{'CREDENTIALS_DIRECTORY':str(directory)}),patch.object(Path,'lstat',writable_ancestor):
+            self.assertFalse(policy(path,token))
+
+    def test_observer_reads_0440_systemd_fixture_without_echoing_credential(self):
+        token='fixture-credential-canary-never-live-12345'
+        actual=Path(self.tmp.name)/'credential-fixture';actual.write_text(token);actual.chmod(0o600)
+        directory=Path('/run/credentials/run-readiness-fixture.service')
+        expected_path=directory/'client_token'
+        real_open=os.open;real_fstat=os.fstat;fds=set();requests=[];responses=[diagnostics(),catalog()]
+        def open_fixture(path,flags,*args):
+            self.assertEqual(Path(path),expected_path)
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            fd=real_open(actual,flags,*args);fds.add(fd);return fd
+        def credential_metadata(fd):
+            actual_stat=real_fstat(fd)
+            return SimpleNamespace(st_mode=stat.S_IFREG|0o440,st_uid=0,st_gid=0,st_size=actual_stat.st_size)
+        def parent_metadata(path):return SimpleNamespace(st_mode=stat.S_IFDIR|(0o550 if path==directory else 0o755),st_uid=0,st_gid=0)
+        connection=SimpleNamespace(request=lambda method,path,headers:requests.append((method,path,headers)),
+            getresponse=lambda:SimpleNamespace(status=200,read=lambda n:json.dumps(responses.pop(0)).encode()),close=lambda:None)
+        output=io.StringIO()
+        with patch.dict(os.environ,{'CREDENTIALS_DIRECTORY':str(directory)}), \
+             patch.object(os,'open',open_fixture),patch.object(os,'fstat',credential_metadata), \
+             patch.object(Path,'lstat',parent_metadata),patch.object(os,'geteuid',return_value=999), \
+             patch.object(os,'getegid',return_value=983),patch.object(http.client,'HTTPConnection',return_value=connection), \
+             patch.object(signal,'signal'),patch.object(signal,'setitimer'),redirect_stdout(output):
+            exec(gate.OBSERVER_CODE,{})
+        self.assertNotIn(token,output.getvalue())
+        self.assertEqual([(m,p)for m,p,h in requests],[('GET','/v1/diagnostics'),('GET','/v1/catalog')])
+        self.assertTrue(all(headers['Authorization']=='Bearer '+token for m,p,headers in requests))
+        projected=json.loads(output.getvalue())
+        gate._api(projected['diagnostics'],projected['google_catalog'],NOW,current=True)
 
     def test_systemd_run_has_per_service_credential_no_of_files_or_export(self):
         with patch.object(gate,'_run',return_value=b'{}') as run:
